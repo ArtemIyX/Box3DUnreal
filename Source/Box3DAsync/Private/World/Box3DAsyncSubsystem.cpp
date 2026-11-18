@@ -142,7 +142,11 @@ namespace
 		struct FEdgeDirection
 		{
 			FEdgeDirection() = default;
-			FEdgeDirection(int8 InDirection, uint8 InCount) : Direction(InDirection), Count(InCount) {}
+
+			FEdgeDirection(int8 InDirection, uint8 InCount) : Direction(InDirection), Count(InCount)
+			{
+			}
+
 			int8 Direction = 0;
 			uint8 Count = 0;
 		};
@@ -214,11 +218,12 @@ namespace Box3DAsyncPrivate
 {
 #if WITH_DEV_AUTOMATION_TESTS
 	bool ValidateAndCopyGeometryForTest(const TArray<FVector>& Vertices, const TArray<int32>& Indices,
-		EBox3DAsyncMeshWinding Winding, TArray<b3Vec3>& OutVertices, TArray<int32>& OutIndices,
-		uint64& OutByteCount, FVector& OutBoundsMin, FVector& OutBoundsMax)
+	                                    EBox3DAsyncMeshWinding Winding, TArray<b3Vec3>& OutVertices,
+	                                    TArray<int32>& OutIndices,
+	                                    uint64& OutByteCount, FVector& OutBoundsMin, FVector& OutBoundsMax)
 	{
 		return ValidateAndCopyGeometry(Vertices, Indices, Winding, OutVertices, OutIndices,
-			OutByteCount, OutBoundsMin, OutBoundsMax);
+		                               OutByteCount, OutBoundsMin, OutBoundsMax);
 	}
 #endif
 	bool IsSupportedAuthoredCollisionScale(bool bHasRoundShapes, const FVector& Scale)
@@ -293,7 +298,8 @@ namespace Box3DAsyncPrivate
 			const b3Vec3 NativeA = Box3D::ToB3((FVector(Element.Center) - AxisOffset) * Scale);
 			const b3Vec3 NativeB = Box3D::ToB3((FVector(Element.Center) + AxisOffset) * Scale);
 			const float Radius = float(double(Element.Radius) * Scale.X * Box3D::UEToMeters);
-			if (!IsFiniteNativeVector(NativeA) || !IsFiniteNativeVector(NativeB) || !FMath::IsFinite(Radius) || Radius <= 0.0f)
+			if (!IsFiniteNativeVector(NativeA) || !IsFiniteNativeVector(NativeB) || !FMath::IsFinite(Radius) || Radius
+				<= 0.0f)
 				return false;
 			IncludeBounds(FVector(FMath::Min(NativeA.x, NativeB.x) - Radius, FMath::Min(NativeA.y, NativeB.y) - Radius,
 			                      FMath::Min(NativeA.z, NativeB.z) - Radius),
@@ -398,9 +404,13 @@ void UBox3DAsyncSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 		return;
 	}
 	Impl->Worker = MakeUnique<FImpl::FWorker>(*Impl);
+	Box3DAsyncStats::RegisterWorld(Impl.Get());
+	Impl->bStatsRegistered = true;
 	Impl->Thread = FRunnableThread::Create(Impl->Worker.Get(), TEXT("Box3DAsyncWorld"), 0, TPri_AboveNormal);
 	if (Impl->Thread == nullptr)
 	{
+		Box3DAsyncStats::UnregisterWorld(Impl.Get());
+		Impl->bStatsRegistered = false;
 		Impl->bAccepting = false;
 		Impl->Worker.Reset();
 		FPlatformProcess::ReturnSynchEventToPool(Impl->WakeEvent);
@@ -491,9 +501,9 @@ bool UBox3DAsyncSubsystem::TryCreateDynamicSphere(const FTransform& Transform, f
 }
 
 bool UBox3DAsyncSubsystem::TryRegisterStaticMeshGeometry(const TArray<FVector>& Vertices,
-                                                        const TArray<int32>& Indices,
-                                                        EBox3DAsyncMeshWinding Winding,
-                                                        FBox3DAsyncGeometryId& OutGeometryId)
+                                                         const TArray<int32>& Indices,
+                                                         EBox3DAsyncMeshWinding Winding,
+                                                         FBox3DAsyncGeometryId& OutGeometryId)
 {
 	check(IsInGameThread());
 	OutGeometryId = 0;
@@ -632,9 +642,24 @@ bool UBox3DAsyncSubsystem::TryRegisterBakedMesh(const UBox3DCollisionData* Data,
 bool UBox3DAsyncSubsystem::TryCreateStaticMeshCollision(UStaticMesh* Mesh, const FTransform& Transform,
                                                         const FVector& Scale, FBox3DAsyncBodyId& OutBodyId)
 {
+	return TryCreateAuthoredMeshCollision(Mesh, Transform, Scale, FVector::ZeroVector, false, OutBodyId);
+}
+
+bool UBox3DAsyncSubsystem::TryCreateDynamicMeshCollision(UStaticMesh* Mesh, const FTransform& Transform,
+                                                         const FVector& Scale, const FVector& InitialVelocity,
+                                                         FBox3DAsyncBodyId& OutBodyId)
+{
+	return TryCreateAuthoredMeshCollision(Mesh, Transform, Scale, InitialVelocity, true, OutBodyId);
+}
+
+bool UBox3DAsyncSubsystem::TryCreateAuthoredMeshCollision(UStaticMesh* Mesh, const FTransform& Transform,
+                                                          const FVector& Scale, const FVector& InitialVelocity,
+                                                          bool bDynamic, FBox3DAsyncBodyId& OutBodyId)
+{
 	check(IsInGameThread());
 	OutBodyId = 0;
-	if (!Impl.IsValid() || Mesh == nullptr || !IsValidTransform(Transform) || !IsValidPositiveScale(Scale))
+	if (!Impl.IsValid() || Mesh == nullptr || !IsValidTransform(Transform) || !IsValidPositiveScale(Scale)
+		|| !IsFiniteVector(InitialVelocity) || !IsFiniteNativeVector(Box3D::ToB3(InitialVelocity)))
 	{
 		return false;
 	}
@@ -644,14 +669,17 @@ bool UBox3DAsyncSubsystem::TryCreateStaticMeshCollision(UStaticMesh* Mesh, const
 		return false;
 	}
 	FImpl::FCommand Command;
-	Command.Type = FImpl::ECommandType::CreateAuthoredStaticBody;
+	Command.Type = bDynamic
+		               ? FImpl::ECommandType::CreateAuthoredDynamicBody
+		               : FImpl::ECommandType::CreateAuthoredStaticBody;
 	Command.Transform = Transform;
 	Command.Scale = Scale;
+	Command.InitialVelocity = InitialVelocity;
 	FVector BoundsMin;
 	FVector BoundsMax;
 	uint64 PayloadBytes = 0;
 	if (!Box3DAsyncPrivate::CopyAuthoredCollisionShapes(*BodySetup, Scale, Command.StaticShapes,
-		BoundsMin, BoundsMax, PayloadBytes))
+	                                                    BoundsMin, BoundsMax, PayloadBytes))
 	{
 		return false;
 	}
@@ -953,4 +981,3 @@ FBox3DAsyncDiagnostics UBox3DAsyncSubsystem::GetDiagnostics() const
 	Result.RegisteredMeshGeometries = Impl->AcceptedGeometryIds.Num();
 	return Result;
 }
-

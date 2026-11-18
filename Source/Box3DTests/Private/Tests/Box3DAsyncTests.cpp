@@ -1,8 +1,129 @@
 #include "World/Box3DAsyncSubsystemImpl.h"
+#include "World/Box3DAsyncStats.h"
 #include "Misc/AutomationTest.h"
 #include "PhysicsEngine/BodySetup.h"
+#include "Box3DTestHelpers.h"
+#include "HAL/PlatformProcess.h"
+#include "HAL/PlatformTime.h"
+#include "Misc/ScopeExit.h"
 #include "box3d/collision.h"
 #include <limits>
+
+#if WITH_DEV_AUTOMATION_TESTS
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FBox3DAsyncStatsAggregationTest,
+	"Box3D.Async.StatsAggregation", EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FBox3DAsyncStatsAggregationTest::RunTest(const FString& Parameters)
+{
+	const Box3DAsyncStats::FAggregate Baseline = Box3DAsyncStats::GetAggregate();
+	auto First = MakeUnique<Box3DTest::FTestWorld>(TEXT("AsyncStatsFirst"));
+	auto Second = MakeUnique<Box3DTest::FTestWorld>(TEXT("AsyncStatsSecond"));
+	UBox3DAsyncSubsystem* A = First->World->GetSubsystem<UBox3DAsyncSubsystem>();
+	UBox3DAsyncSubsystem* B = Second->World->GetSubsystem<UBox3DAsyncSubsystem>();
+	if (!TestNotNull(TEXT("First async world"), A) || !TestNotNull(TEXT("Second async world"), B)) return false;
+	FBox3DAsyncBodyId AId = 0, BId = 0;
+	if (!TestTrue(TEXT("First box queued"), A->TryCreateStaticBox(FTransform::Identity, FVector(50), AId))
+		|| !TestTrue(TEXT("Second box queued"), B->TryCreateStaticBox(FTransform::Identity, FVector(50), BId))) return false;
+	const double Deadline = FPlatformTime::Seconds() + 5.0;
+	bool bPublished = false;
+	while (FPlatformTime::Seconds() < Deadline)
+	{
+		const Box3DAsyncStats::FAggregate Stats = Box3DAsyncStats::GetAggregate();
+		if (Stats.WorldCount == Baseline.WorldCount + 2 && Stats.Bodies >= Baseline.Bodies + 2
+			&& Stats.Shapes >= Baseline.Shapes + 2 && A->GetCompletedStepCount() > 0 && B->GetCompletedStepCount() > 0)
+		{
+			bPublished = true;
+			break;
+		}
+		FPlatformProcess::Sleep(0.01f);
+	}
+	TestTrue(TEXT("Both worker snapshots contribute"), bPublished);
+	First.Reset();
+	TestEqual(TEXT("First world contribution removed"), Box3DAsyncStats::GetAggregate().WorldCount, Baseline.WorldCount + 1);
+	Second.Reset();
+	TestEqual(TEXT("Both world contributions removed"), Box3DAsyncStats::GetAggregate().WorldCount, Baseline.WorldCount);
+	return true;
+}
+#endif
+
+#if WITH_DEV_AUTOMATION_TESTS
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FBox3DAsyncDynamicAuthoredBoxTest,
+	"Box3D.Async.DynamicAuthoredBox",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FBox3DAsyncDynamicAuthoredBoxTest::RunTest(const FString& Parameters)
+{
+	UBox3DSettings* Settings = GetMutableDefault<UBox3DSettings>();
+	const FVector PreviousGravity = Settings->Gravity;
+	Settings->Gravity = FVector(0, 0, -980);
+	ON_SCOPE_EXIT { Settings->Gravity = PreviousGravity; };
+	Box3DTest::FTestWorld TestWorld(TEXT("Box3DAsyncDynamicBoxTest"));
+	UBox3DAsyncSubsystem* Physics = TestWorld.World->GetSubsystem<UBox3DAsyncSubsystem>();
+	if (!TestNotNull(TEXT("Async subsystem exists"), Physics)) return false;
+
+	UStaticMesh* Mesh = NewObject<UStaticMesh>(GetTransientPackage());
+	UBodySetup* Setup = NewObject<UBodySetup>(Mesh);
+	Mesh->SetBodySetup(Setup);
+	FKBoxElem& Box = Setup->AggGeom.BoxElems.AddDefaulted_GetRef();
+	Box.X = 200.0f;
+	Box.Y = 100.0f;
+	Box.Z = 50.0f;
+
+	FBox3DAsyncBodyId FloorId = 0;
+	FBox3DAsyncBodyId BoxId = 0;
+	if (!TestTrue(TEXT("Floor accepted"), Physics->TryCreateStaticBox(
+		FTransform(FVector(0, 0, -50)), FVector(500, 500, 50), FloorId))) return false;
+	if (!TestTrue(TEXT("Authored dynamic box accepted"), Physics->TryCreateDynamicMeshCollision(
+		Mesh, FTransform(FVector(0, 0, 100)), FVector::OneVector, FVector::ZeroVector, BoxId))) return false;
+
+	bool bCreated = false;
+	double Deadline = FPlatformTime::Seconds() + 5.0;
+	while (FPlatformTime::Seconds() < Deadline && !bCreated)
+	{
+		TArray<FBox3DAsyncCreationResult> Results;
+		Physics->DrainCreationResults(Results);
+		for (const FBox3DAsyncCreationResult& Result : Results)
+		{
+			if (Result.Kind == EBox3DAsyncCreationKind::Body && Result.ResourceId == BoxId)
+			{
+				if (!TestTrue(TEXT("Dynamic box created"), Result.bSucceeded)) return false;
+				bCreated = true;
+			}
+		}
+		FPlatformProcess::Sleep(0.01f);
+	}
+	if (!TestTrue(TEXT("Dynamic box creation completed"), bCreated)) return false;
+
+	// A 50 cm tall box rests around z=25; a 100 cm radius sphere proxy would not.
+	bool bRestedAtBoxHeight = false;
+	double InRangeSince = 0.0;
+	Deadline = FPlatformTime::Seconds() + 5.0;
+	while (FPlatformTime::Seconds() < Deadline && !bRestedAtBoxHeight)
+	{
+		TArray<FBox3DAsyncPose> Poses;
+		Physics->SamplePoses(Poses);
+		for (const FBox3DAsyncPose& Pose : Poses)
+		{
+			if (Pose.BodyId == BoxId)
+			{
+				const double Height = Pose.Transform.GetLocation().Z;
+				if (Height > 15.0 && Height < 35.0)
+				{
+					if (InRangeSince == 0.0) InRangeSince = FPlatformTime::Seconds();
+					bRestedAtBoxHeight = FPlatformTime::Seconds() - InRangeSince >= 0.5;
+				}
+				else
+				{
+					InRangeSince = 0.0;
+				}
+			}
+		}
+		FPlatformProcess::Sleep(0.01f);
+	}
+	TestTrue(TEXT("Dynamic authored box falls and reaches the floor at box height"), bRestedAtBoxHeight);
+	return true;
+}
+#endif
 
 #if WITH_DEV_AUTOMATION_TESTS
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FBox3DAsyncMeshInputValidationTest,

@@ -8,13 +8,16 @@
 #include "Misc/ScopeLock.h"
 #include "PhysicsEngine/BodySetup.h"
 #include "box3d/box3d.h"
+#include "Box3DAsyncStats.h"
 
 namespace Box3DAsyncPrivate
 {
 #if WITH_DEV_AUTOMATION_TESTS
 	BOX3DASYNC_API bool ValidateAndCopyGeometryForTest(const TArray<FVector>& Vertices, const TArray<int32>& Indices,
-		EBox3DAsyncMeshWinding Winding, TArray<b3Vec3>& OutVertices, TArray<int32>& OutIndices,
-		uint64& OutByteCount, FVector& OutBoundsMin, FVector& OutBoundsMax);
+	                                                   EBox3DAsyncMeshWinding Winding, TArray<b3Vec3>& OutVertices,
+	                                                   TArray<int32>& OutIndices,
+	                                                   uint64& OutByteCount, FVector& OutBoundsMin,
+	                                                   FVector& OutBoundsMax);
 	BOX3DASYNC_API bool IsCompleteMeshCookForTest(const b3MeshData* MeshData, int32 ExpectedTriangleCount);
 #endif
 
@@ -30,12 +33,17 @@ namespace Box3DAsyncPrivate
 
 	BOX3DASYNC_API bool IsSupportedAuthoredCollisionScale(bool bHasRoundShapes, const FVector& Scale);
 	BOX3DASYNC_API bool CopyAuthoredCollisionShapes(const UBodySetup& BodySetup, const FVector& Scale,
-		TArray<FCopiedStaticShape>& OutShapes, FVector& OutBoundsMin, FVector& OutBoundsMax, uint64& OutPayloadBytes);
+	                                                TArray<FCopiedStaticShape>& OutShapes, FVector& OutBoundsMin,
+	                                                FVector& OutBoundsMax, uint64& OutPayloadBytes);
 }
 
 struct UBox3DAsyncSubsystem::FImpl
 {
-	enum class ECommandType : uint8 { CreateBox, CreateSphere, RegisterGeometry, CreateMeshInstance, CreateAuthoredStaticBody, ReleaseGeometry, Remove };
+	enum class ECommandType : uint8
+	{
+		CreateBox, CreateSphere, RegisterGeometry, CreateMeshInstance, CreateAuthoredStaticBody,
+		CreateAuthoredDynamicBody, ReleaseGeometry, Remove
+	};
 
 	struct FCommand
 	{
@@ -130,11 +138,13 @@ struct UBox3DAsyncSubsystem::FImpl
 	TSet<FBox3DAsyncBodyId> AcceptedBodyIds;
 	TSet<FBox3DAsyncGeometryId> AcceptedGeometryIds;
 	TMap<FBox3DAsyncGeometryId, uint64> GeometryByteReservations;
+
 	struct FGeometryBounds
 	{
 		FVector Min = FVector::ZeroVector;
 		FVector Max = FVector::ZeroVector;
 	};
+
 	TMap<FBox3DAsyncGeometryId, FGeometryBounds> AcceptedGeometryBounds;
 	uint64 ReservedGeometryBytes = 0;
 	uint64 ReservedStaticShapeBytes = 0;
@@ -149,6 +159,7 @@ struct UBox3DAsyncSubsystem::FImpl
 	TUniquePtr<FWorker> Worker;
 	FRunnableThread* Thread = nullptr;
 	bool bAccepting = false;
+	bool bStatsRegistered = false;
 
 	void PublishCreationResult(EBox3DAsyncCreationKind Kind, uint64 ResourceId, bool bSucceeded,
 	                           int32 DegenerateCount = 0, int32 DroppedTriangleCount = 0)
@@ -179,6 +190,11 @@ struct UBox3DAsyncSubsystem::FImpl
 			Thread = nullptr;
 		}
 		Worker.Reset();
+		if (bStatsRegistered)
+		{
+			Box3DAsyncStats::UnregisterWorld(this);
+			bStatsRegistered = false;
+		}
 		if (b3World_IsValid(WorldId))
 		{
 			b3DestroyWorld(WorldId);
@@ -194,4 +210,3 @@ struct UBox3DAsyncSubsystem::FImpl
 		}
 	}
 };
-

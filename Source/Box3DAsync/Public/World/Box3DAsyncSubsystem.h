@@ -105,6 +105,9 @@ public:
 	/** Copy authored UStaticMesh simple collision and queue one static body with multiple shapes. Boxes and convex hulls support nonuniform positive scale; meshes with spheres or capsules require uniform positive scale. */
 	bool TryCreateStaticMeshCollision(UStaticMesh* Mesh, const FTransform& Transform, const FVector& Scale,
 		FBox3DAsyncBodyId& OutBodyId);
+	/** Queue a dynamic body using the mesh's authored simple collision. Round shapes require uniform positive scale. */
+	bool TryCreateDynamicMeshCollision(UStaticMesh* Mesh, const FTransform& Transform, const FVector& Scale,
+		const FVector& InitialVelocity, FBox3DAsyncBodyId& OutBodyId);
 	/** Queue a static instance of registered reusable geometry with positive scale components (minimum 1e-4). */
 	bool TryCreateStaticMeshInstance(FBox3DAsyncGeometryId GeometryId, const FTransform& Transform,
 		const FVector& Scale, FBox3DAsyncBodyId& OutBodyId);
@@ -126,6 +129,8 @@ public:
 	FBox3DAsyncDiagnostics GetDiagnostics() const;
 
 private:
+	bool TryCreateAuthoredMeshCollision(UStaticMesh* Mesh, const FTransform& Transform, const FVector& Scale,
+		const FVector& InitialVelocity, bool bDynamic, FBox3DAsyncBodyId& OutBodyId);
 	struct FImpl;
 	TUniquePtr<FImpl> Impl;
 };

@@ -150,11 +150,12 @@ void UBox3DAsyncSubsystem::FImpl::FWorker::ApplyCommands()
 			DegenerateTriangles.SetNumZeroed(MeshDef.triangleCount);
 			b3MeshData* MeshData = b3CreateMesh(&MeshDef, DegenerateTriangles.GetData(), DegenerateTriangles.Num());
 			const uint64 CookedBytes = MeshData != nullptr && MeshData->byteCount > 0
-				? uint64(MeshData->byteCount) : 0;
+				                           ? uint64(MeshData->byteCount)
+				                           : 0;
 			const int32 CookedDegenerateCount = MeshData != nullptr ? MeshData->degenerateCount : 0;
 			const int32 DroppedTriangleCount = MeshData != nullptr
-				? FMath::Max(0, MeshDef.triangleCount - MeshData->triangleCount)
-				: MeshDef.triangleCount;
+				                                   ? FMath::Max(0, MeshDef.triangleCount - MeshData->triangleCount)
+				                                   : MeshDef.triangleCount;
 			bool bCookSucceeded = IsCompleteMeshCook(MeshData, MeshDef.triangleCount)
 				&& CookedBytes <= UBox3DAsyncSubsystem::MaxMeshGeometryBytes;
 			{
@@ -188,7 +189,7 @@ void UBox3DAsyncSubsystem::FImpl::FWorker::ApplyCommands()
 					++Owner.NativeCreationFailures;
 				}
 				Owner.PublishCreationResult(EBox3DAsyncCreationKind::MeshGeometry, Command.GeometryId, false,
-					CookedDegenerateCount, DroppedTriangleCount);
+				                            CookedDegenerateCount, DroppedTriangleCount);
 				continue;
 			}
 			FGeometry Geometry;
@@ -237,7 +238,7 @@ void UBox3DAsyncSubsystem::FImpl::FWorker::ApplyCommands()
 					++Owner.NativeCreationFailures;
 				}
 				Owner.PublishCreationResult(EBox3DAsyncCreationKind::Body, Command.BodyId, false);
-			continue;
+				continue;
 			}
 			b3BodyDef BodyDef = b3DefaultBodyDef();
 			BodyDef.type = b3_staticBody;
@@ -249,8 +250,9 @@ void UBox3DAsyncSubsystem::FImpl::FWorker::ApplyCommands()
 			ShapeDef.filter.categoryBits = StaticCategory;
 			ShapeDef.filter.maskBits = StaticCategory | DynamicCategory;
 			const b3ShapeId ShapeId = b3Body_IsValid(NativeBody)
-				? b3CreateMeshShape(NativeBody, &ShapeDef, Geometry->NativeData, Box3D::ToB3Dir(Command.Scale))
-				: b3ShapeId{};
+				                          ? b3CreateMeshShape(NativeBody, &ShapeDef, Geometry->NativeData,
+				                                              Box3D::ToB3Dir(Command.Scale))
+				                          : b3ShapeId{};
 			if (!b3Body_IsValid(NativeBody) || !b3Shape_IsValid(ShapeId))
 			{
 				if (b3Body_IsValid(NativeBody))
@@ -274,17 +276,20 @@ void UBox3DAsyncSubsystem::FImpl::FWorker::ApplyCommands()
 			continue;
 		}
 
-		if (Command.Type == ECommandType::CreateAuthoredStaticBody)
+		if (Command.Type == ECommandType::CreateAuthoredStaticBody || Command.Type ==
+			ECommandType::CreateAuthoredDynamicBody)
 		{
+			const bool bDynamic = Command.Type == ECommandType::CreateAuthoredDynamicBody;
 			b3BodyDef BodyDef = b3DefaultBodyDef();
-			BodyDef.type = b3_staticBody;
+			BodyDef.type = bDynamic ? b3_dynamicBody : b3_staticBody;
 			BodyDef.position = Box3D::ToB3Pos(Command.Transform.GetLocation());
 			BodyDef.rotation = Box3D::ToB3(Command.Transform.GetRotation());
+			BodyDef.linearVelocity = Box3D::ToB3(Command.InitialVelocity);
 			BodyDef.userData = reinterpret_cast<void*>(static_cast<UPTRINT>(Command.BodyId));
 			const b3BodyId NativeBody = b3CreateBody(Owner.WorldId, &BodyDef);
 			bool bSucceeded = b3Body_IsValid(NativeBody);
 			b3ShapeDef ShapeDef = b3DefaultShapeDef();
-			ShapeDef.filter.categoryBits = StaticCategory;
+			ShapeDef.filter.categoryBits = bDynamic ? DynamicCategory : StaticCategory;
 			ShapeDef.filter.maskBits = StaticCategory | DynamicCategory;
 			for (const Box3DAsyncPrivate::FCopiedStaticShape& Shape : Command.StaticShapes)
 			{
@@ -332,7 +337,7 @@ void UBox3DAsyncSubsystem::FImpl::FWorker::ApplyCommands()
 				Owner.PublishCreationResult(EBox3DAsyncCreationKind::Body, Command.BodyId, false);
 				continue;
 			}
-			Owner.WorkerBodies.Add(Command.BodyId, FBody(NativeBody, false));
+			Owner.WorkerBodies.Add(Command.BodyId, FBody(NativeBody, bDynamic));
 			Owner.PublishCreationResult(EBox3DAsyncCreationKind::Body, Command.BodyId, true);
 			continue;
 		}
@@ -463,6 +468,22 @@ void UBox3DAsyncSubsystem::FImpl::FWorker::StepAndPublish(double ScheduledTime, 
 			FScopeLock Lock(&Owner.DiagnosticsMutex);
 			++Owner.CompletedSteps;
 		}
+		Box3DAsyncStats::FWorldSnapshot Stats;
+		Stats.Profile = b3World_GetProfile(Owner.WorldId);
+		Stats.Counters = b3World_GetCounters(Owner.WorldId);
+		Stats.AwakeBodies = b3World_GetAwakeBodyCount(Owner.WorldId);
+		{
+			FScopeLock Lock(&Owner.DiagnosticsMutex);
+			Stats.CompletedSteps = Owner.CompletedSteps;
+			Stats.DeadlineMisses = Owner.DeadlineMisses;
+			Stats.ClockRebases = Owner.ClockRebases;
+		}
+		{
+			FScopeLock Lock(&Owner.QueueMutex);
+			Stats.QueuedCommands = Owner.Commands.Num();
+			Stats.OutstandingTraces = Owner.TraceRequests.Num() + Owner.InFlightTraces + Owner.TraceResults.Num();
+		}
+		Box3DAsyncStats::Publish(&Owner, Stats);
 	}
 	{
 		FScopeLock Lock(&Owner.DiagnosticsMutex);
