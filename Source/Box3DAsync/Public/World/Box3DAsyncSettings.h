@@ -30,7 +30,7 @@ public:
 	int32 MaxPersistentFields = 64;
 
 	/** Maximum magnitude of a field force on one body in kg*cm/s^2. */
-	UPROPERTY(EditAnywhere, config, Category = "Fields", meta = (ClampMin = "1", ClampMax = "1e12"))
+	UPROPERTY(EditAnywhere, config, Category = "Fields", meta = (ClampMin = "1", ClampMax = "1000000000000"))
 	float MaxFieldForce = 1.0e12f;
 
 	/** Maximum outstanding joint identities, including failed joints awaiting removal. */

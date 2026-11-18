@@ -60,6 +60,8 @@ public:
 	virtual void DetachedFromReplication(const FDestroyedContext& Context) override;
 	virtual TOptional<FWorldInfoData> GetWorldInfo(const FWorldInfoContext& Context) const override;
 	virtual float GetPollFrequency(UE::Net::FNetRefHandle RootObjectHandle, UObject* RootObjectInstance) override;
+	
+protected:
 	virtual TUniquePtr<UE::Net::FNetObjectCreationHeader> CreateAndFillHeader(UE::Net::FNetRefHandle Handle) override;
 	virtual bool SerializeHeader(const UE::Net::FCreationHeaderContext& Context,
 		const UE::Net::FNetObjectCreationHeader* Header) override;

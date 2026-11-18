@@ -53,13 +53,14 @@ bool Box3DIrisReplication::TryQuantizePositionToCentimeter(const FVector& Value,
 		return FMath::IsFinite(OutComponent);
 	};
 	FVector Quantized;
-	if (!Quantize(Value.X, Quantized.X) || !Quantize(Value.Y, Quantized.Y) || !Quantize(Value.Z, Quantized.Z)) return false;
+	if (!Quantize(Value.X, Quantized.X) || !Quantize(Value.Y, Quantized.Y) || !Quantize(Value.Z, Quantized.Z))
+		return false;
 	OutQuantized = Quantized;
 	return true;
 }
 
 bool Box3DIrisReplication::ShouldSuspendForAuthorityOriginShift(const FVector& FrozenOrigin,
-	const FVector& CurrentOrigin, bool bAlreadySuspended)
+                                                                const FVector& CurrentOrigin, bool bAlreadySuspended)
 {
 	return bAlreadySuspended || !CurrentOrigin.Equals(FrozenOrigin, 0.0);
 }
@@ -75,7 +76,7 @@ FVector Box3DIrisReplication::ToLocalWorldPosition(const FVector& AbsolutePositi
 }
 
 int32 Box3DIrisReplication::ComputeNextCandidateCursor(int32 StartIndex, int32 CandidateCount,
-	int32 TotalCount, int32 FirstDeferredCandidate)
+                                                       int32 TotalCount, int32 FirstDeferredCandidate)
 {
 	if (TotalCount <= 0) return 0;
 	const int32 Offset = FirstDeferredCandidate >= 0 ? FirstDeferredCandidate : CandidateCount;
@@ -83,19 +84,20 @@ int32 Box3DIrisReplication::ComputeNextCandidateCursor(int32 StartIndex, int32 C
 }
 
 bool Box3DIrisReplication::IsAdmissionPreferred(double CandidateDistance, uint64 CandidateId,
-	double ResidentDistance, uint64 ResidentId)
+                                                double ResidentDistance, uint64 ResidentId)
 {
 	return CandidateDistance < ResidentDistance
 		|| (CandidateDistance == ResidentDistance && CandidateId < ResidentId);
 }
 
 Box3DIrisReplication::FStageBudget Box3DIrisReplication::ComputeStageBudget(int32 LifecycleCount,
-	int32 RoutineCount, int32 TotalBudget, int32 MaxLifecycleBudget)
+                                                                            int32 RoutineCount, int32 TotalBudget,
+                                                                            int32 MaxLifecycleBudget)
 {
 	FStageBudget Result;
 	const int32 SafeTotalBudget = FMath::Max(0, TotalBudget);
 	Result.Lifecycle = FMath::Min(FMath::Max(0, LifecycleCount),
-		FMath::Min(SafeTotalBudget, FMath::Max(0, MaxLifecycleBudget)));
+	                              FMath::Min(SafeTotalBudget, FMath::Max(0, MaxLifecycleBudget)));
 	Result.Routine = FMath::Min(FMath::Max(0, RoutineCount), SafeTotalBudget - Result.Lifecycle);
 	return Result;
 }
@@ -109,8 +111,11 @@ TArray<Box3DIrisReplication::FDistanceTier> Box3DIrisReplication::GetDistanceTie
 			Tiers.Add({double(Pair.Key), 1.0 / double(Pair.Value)});
 	}
 	Tiers.Sort([](const FDistanceTier& A, const FDistanceTier& B) { return A.MaxDistance < B.MaxDistance; });
-	if (Tiers.IsEmpty()) Tiers = {{1500.0, 1.0 / 60.0}, {2500.0, 1.0 / 45.0},
-		{4000.0, 1.0 / 30.0}, {7000.0, 1.0 / 15.0}, {10000.0, 1.0 / 5.0}};
+	if (Tiers.IsEmpty())
+		Tiers = {
+			{1500.0, 1.0 / 60.0}, {2500.0, 1.0 / 45.0},
+			{4000.0, 1.0 / 30.0}, {7000.0, 1.0 / 15.0}, {10000.0, 1.0 / 5.0}
+		};
 	return Tiers;
 }
 
@@ -121,7 +126,7 @@ double Box3DIrisReplication::ComputeTierInterval(double Distance, double Previou
 }
 
 double Box3DIrisReplication::ComputeTierInterval(double Distance, double PreviousInterval,
-	const TArray<FDistanceTier>& Tiers, double Hysteresis)
+                                                 const TArray<FDistanceTier>& Tiers, double Hysteresis)
 {
 	if (Tiers.IsEmpty()) return 1.0 / 5.0;
 	Hysteresis = FMath::IsFinite(Hysteresis) ? FMath::Max(0.0, Hysteresis) : 0.0;
@@ -130,7 +135,8 @@ double Box3DIrisReplication::ComputeTierInterval(double Distance, double Previou
 		const double Lower = Index == 0 ? 0.0 : Tiers[Index - 1].MaxDistance;
 		const double Upper = Tiers[Index].MaxDistance;
 		if (PreviousInterval == Tiers[Index].Interval && (Index == 0 || Distance > Lower - Hysteresis)
-			&& (Index == Tiers.Num() - 1 || Distance <= Upper + Hysteresis)) return Tiers[Index].Interval;
+			&& (Index == Tiers.Num() - 1 || Distance <= Upper + Hysteresis))
+			return Tiers[Index].Interval;
 	}
 	for (const FDistanceTier& Tier : Tiers)
 		if (Distance <= Tier.MaxDistance) return Tier.Interval;
@@ -156,8 +162,9 @@ bool Box3DIrisReplication::IsCaptureSequenceNewer(uint32 NewSequence, uint32 Pre
 }
 
 bool Box3DIrisReplication::ShouldResetPresentation(uint64 BodyId, uint32 RelevanceRevision,
-	uint32 DiscontinuityRevision, uint64 PreviousBodyId, uint32 PreviousRelevanceRevision,
-	uint32 PreviousDiscontinuityRevision, bool bHasPrevious)
+                                                   uint32 DiscontinuityRevision, uint64 PreviousBodyId,
+                                                   uint32 PreviousRelevanceRevision,
+                                                   uint32 PreviousDiscontinuityRevision, bool bHasPrevious)
 {
 	return !bHasPrevious || BodyId != PreviousBodyId || RelevanceRevision != PreviousRelevanceRevision
 		|| DiscontinuityRevision != PreviousDiscontinuityRevision;
@@ -201,7 +208,7 @@ void UBox3DIrisReplicationRoot::GetLifetimeReplicatedProps(TArray<FLifetimePrope
 }
 
 void UBox3DIrisReplicationRoot::SetNetworkMetadata(const FGuid& InWorldEpoch, const FVector& InNetworkOrigin,
-	uint32 InOriginRevision)
+                                                   uint32 InOriginRevision)
 {
 	WorldEpoch = InWorldEpoch;
 	NetworkOrigin = InNetworkOrigin;
@@ -228,7 +235,8 @@ void UBox3DIrisReplicationRoot::OnReceivedItems()
 	// Presentation is intentionally owned by the game-thread replication subsystem.
 }
 
-void FBox3DIrisBodyArray::PostReplicatedReceive(const FFastArraySerializer::FPostReplicatedReceiveParameters& Parameters)
+void FBox3DIrisBodyArray::PostReplicatedReceive(
+	const FFastArraySerializer::FPostReplicatedReceiveParameters& Parameters)
 {
 	if (UBox3DIrisReplicationRoot* Root = Owner.Get()) Root->OnReceivedItems();
 }
@@ -288,7 +296,7 @@ TOptional<UNetObjectFactory::FWorldInfoData> UBox3DIrisNetObjectFactory::GetWorl
 }
 
 float UBox3DIrisNetObjectFactory::GetPollFrequency(UE::Net::FNetRefHandle RootObjectHandle,
-	UObject* RootObjectInstance)
+                                                   UObject* RootObjectInstance)
 {
 	return 0.0f;
 }
@@ -306,7 +314,7 @@ TUniquePtr<UE::Net::FNetObjectCreationHeader> UBox3DIrisNetObjectFactory::Create
 }
 
 bool UBox3DIrisNetObjectFactory::SerializeHeader(const UE::Net::FCreationHeaderContext& Context,
-	const UE::Net::FNetObjectCreationHeader* Header)
+                                                 const UE::Net::FNetObjectCreationHeader* Header)
 {
 	const FBox3DIrisCreationHeader* CreationHeader = static_cast<const FBox3DIrisCreationHeader*>(Header);
 	UE::Net::FNetBitStreamWriter* Writer = Context.Serialization.GetBitStreamWriter();
@@ -348,6 +356,7 @@ TUniquePtr<UE::Net::FNetObjectCreationHeader> UBox3DIrisNetObjectFactory::Create
 	FMemory::Memcpy(&Header->NetworkOrigin.Z, &Bits, sizeof(Bits));
 	Header->OriginRevision = Reader->ReadBits(32);
 	if (Reader->IsOverflown() || !FMath::IsFinite(Header->NetworkOrigin.X)
-		|| !FMath::IsFinite(Header->NetworkOrigin.Y) || !FMath::IsFinite(Header->NetworkOrigin.Z)) return nullptr;
+		|| !FMath::IsFinite(Header->NetworkOrigin.Y) || !FMath::IsFinite(Header->NetworkOrigin.Z))
+		return nullptr;
 	return Header;
 }

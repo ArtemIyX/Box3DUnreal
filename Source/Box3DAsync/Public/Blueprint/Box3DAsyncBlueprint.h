@@ -1,6 +1,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "Containers/Ticker.h"
 #include "Kismet/BlueprintAsyncActionBase.h"
 #include "Kismet/BlueprintFunctionLibrary.h"
 #include "World/Box3DAsyncSubsystem.h"
@@ -47,7 +48,7 @@ private:
 	FBox3DAsyncCreationConsumer Consumer;
 	FBox3DAsyncBodyHandle Body;
 	FBox3DAsyncCreationResult CreationResult;
-	FDelegateHandle Ticker;
+	FTSTicker::FDelegateHandle Ticker;
 	bool bCancel = false;
 	bool bSucceeded = false;
 	bool bHaveResult = false;
