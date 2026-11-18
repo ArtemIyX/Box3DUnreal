@@ -10,6 +10,19 @@ using FBox3DAsyncTraceRequestId = uint64;
 using FBox3DAsyncGeometryId = uint64;
 using FBox3DAsyncShapeId = uint64;
 
+/** Generation-safe public identities. Bare IDs below remain subsystem-local compatibility values. */
+struct BOX3DASYNC_API FBox3DAsyncBodyHandle
+{
+	FGuid World;
+	FBox3DAsyncBodyId Id = 0;
+};
+
+struct BOX3DASYNC_API FBox3DAsyncShapeHandle
+{
+	FGuid World;
+	FBox3DAsyncShapeId Id = 0;
+};
+
 class UStaticMesh;
 class UBox3DCollisionData;
 
@@ -36,10 +49,51 @@ struct BOX3DASYNC_API FBox3DAsyncShapeOptions
 	uint64 CategoryBits = MAX_uint64;
 	uint64 MaskBits = MAX_uint64;
 	float Density = 1.0f;
+	uint64 MaterialId = 0;
+};
+
+enum class EBox3DAsyncBodyMotion : uint8 { Static, Dynamic };
+enum class EBox3DAsyncBodyShapeKind : uint8 { Sphere, Capsule, Box, Convex };
+
+/** Local geometry in centimeters. LocalTransform must have unit scale and a normalized rotation.
+ * Capsule HalfHeight includes the hemispheres; convex points are local to LocalTransform. */
+struct BOX3DASYNC_API FBox3DAsyncBodyShapeDesc
+{
+	EBox3DAsyncBodyShapeKind Kind = EBox3DAsyncBodyShapeKind::Box;
+	FTransform LocalTransform = FTransform::Identity;
+	FVector HalfExtents = FVector(50.0);
+	float Radius = 50.0f;
+	float HalfHeight = 50.0f;
+	TArray<FVector> ConvexPoints;
+	FBox3DAsyncShapeOptions Options;
+	uint64 SubshapeKey = 0;
+};
+
+/** Copied actorless body creation. The body transform must have unit scale. */
+struct BOX3DASYNC_API FBox3DAsyncBodyDesc
+{
+	EBox3DAsyncBodyMotion Motion = EBox3DAsyncBodyMotion::Static;
+	FTransform Transform = FTransform::Identity;
+	FVector InitialVelocity = FVector::ZeroVector;
+	TArray<FBox3DAsyncBodyShapeDesc> Shapes;
+};
+
+struct BOX3DASYNC_API FBox3DAsyncCreationConsumer
+{
+	FGuid World;
+	uint64 Id = 0;
 };
 
 enum class EBox3DAsyncEventKind : uint8 { ContactBegin, ContactEnd, Impact, SensorEnter, SensorExit };
 enum class EBox3DAsyncEventEndCause : uint8 { NativeEnd, Removed };
+
+/** Stamp of a completed outer physics step; presentation can sample a different time. */
+struct BOX3DASYNC_API FBox3DAsyncSampleStamp
+{
+	uint64 Step = 0;
+	double ScheduledMonotonicSeconds = 0.0;
+	uint64 ClockEpoch = 0;
+};
 
 struct BOX3DASYNC_API FBox3DAsyncEvent
 {
@@ -47,6 +101,8 @@ struct BOX3DASYNC_API FBox3DAsyncEvent
 	EBox3DAsyncEventEndCause EndCause = EBox3DAsyncEventEndCause::NativeEnd;
 	FBox3DAsyncBodyId BodyA = 0, BodyB = 0;
 	FBox3DAsyncShapeId ShapeA = 0, ShapeB = 0;
+	FBox3DAsyncBodyHandle BodyHandleA, BodyHandleB;
+	FBox3DAsyncShapeHandle ShapeHandleA, ShapeHandleB;
 	FVector Point = FVector::ZeroVector;
 	FVector Normal = FVector::ZeroVector;
 	float ApproachSpeed = 0;
@@ -63,7 +119,43 @@ struct BOX3DASYNC_API FBox3DAsyncEventBatch
 	FGuid World;
 	uint64 Step = 0;
 	uint64 Sequence = 0;
+	FBox3DAsyncSampleStamp Sample;
 	TArray<FBox3DAsyncEvent> Events;
+};
+
+/** World-scoped event subscription; IDs are never reused within a world. */
+struct BOX3DASYNC_API FBox3DAsyncEventSubscription
+{
+	FGuid World;
+	uint64 Id = 0;
+};
+
+/** Immutable subscription filter. Zero endpoint IDs match either endpoint. */
+struct BOX3DASYNC_API FBox3DAsyncEventFilter
+{
+	FBox3DAsyncBodyId Body = 0;
+	FBox3DAsyncShapeId Shape = 0;
+	/** Prefer qualified filters for cross-world safety; do not combine with the corresponding bare ID. */
+	FBox3DAsyncBodyHandle BodyHandle;
+	FBox3DAsyncShapeHandle ShapeHandle;
+	bool bContacts = true;
+	bool bSensors = true;
+	bool bImpacts = true;
+	/** Aggregate contacts and sensors by body pair; impacts remain per shape. */
+	bool bBodyPairs = false;
+	float MinimumImpactSpeed = 0.0f;
+};
+
+enum class EBox3DAsyncEventPollStatus : uint8 { Pending, Baseline, Events, NeedsResync, Unavailable, Closed };
+
+/** A baseline replaces relationship state at Sequence; deltas continue after it.
+ * A gap can lose impacts and transients, even after a new baseline is installed. */
+struct BOX3DASYNC_API FBox3DAsyncEventDelivery
+{
+	EBox3DAsyncEventPollStatus Status = EBox3DAsyncEventPollStatus::Pending;
+	uint64 FirstMissedSequence = 0;
+	uint64 LastMissedSequence = 0;
+	FBox3DAsyncEventBatch Batch;
 };
 
 struct BOX3DASYNC_API FBox3DAsyncCreationResult
@@ -74,6 +166,10 @@ struct BOX3DASYNC_API FBox3DAsyncCreationResult
 	int32 DegenerateTriangleCount = 0;
 	int32 DroppedTriangleCount = 0;
 	TArray<FBox3DAsyncShapeId> ShapeIds;
+	FBox3DAsyncBodyHandle BodyHandle;
+	TArray<FBox3DAsyncShapeHandle> ShapeHandles;
+	/** Parallel to ShapeHandles, preserving each descriptor's opaque authored key. */
+	TArray<uint64> SubshapeKeys;
 };
 
 struct BOX3DASYNC_API FBox3DAsyncPose
@@ -107,13 +203,30 @@ struct BOX3DASYNC_API FBox3DAsyncQueryHandle
 };
 
 enum class EBox3DAsyncLineMode : uint8 { Any, Closest, Multi };
-enum class EBox3DAsyncQueryStatus : uint8 { Hit, Miss, Truncated, Cancelled };
+enum class EBox3DAsyncQueryStatus : uint8 { Hit, Miss, Truncated, Cancelled, Failed, WorldEnded };
+/** Admission failures do not allocate a request handle. */
+enum class EBox3DAsyncQueryAdmission : uint8 { Accepted, InvalidInput, Unsupported, InvalidConsumer, WrongWorld, Capacity, Unavailable };
+/** A Failed completion makes no hit/miss claim. */
+enum class EBox3DAsyncQueryFailure : uint8 { None, IdentityUnavailable, WorkLimit, WorkerUnavailable };
+enum class EBox3DAsyncQueryKind : uint8 { Line, Sweep, Overlap, AabbCandidates };
+enum class EBox3DAsyncQueryShape : uint8 { Sphere, Capsule, Box, Convex };
 
-/** Copied at admission. Category/mask use Box3D's bilateral filtering. */
+/** Copied at admission. Category/mask use Box3D's bilateral filtering. World
+ * coordinates and rotated local offsets must be within +/- 1e9 cm per axis.
+ * Casts use native initial-overlap behavior; issue an overlap for start-state tests. */
 struct BOX3DASYNC_API FBox3DAsyncLineQuery
 {
+	/** Start/End are world centimeters. End is ignored for an overlap; for AABB they are min/max. */
 	FVector Start = FVector::ZeroVector;
 	FVector End = FVector::ZeroVector;
+	EBox3DAsyncQueryKind Kind = EBox3DAsyncQueryKind::Line;
+	EBox3DAsyncQueryShape Shape = EBox3DAsyncQueryShape::Sphere;
+	/** Fixed geometry orientation. Capsules use local Z; convex points are local centimeters. */
+	FQuat Rotation = FQuat::Identity;
+	float Radius = 0.0f;
+	float HalfHeight = 0.0f;
+	FVector HalfExtents = FVector::ZeroVector;
+	TArray<FVector> ConvexPoints;
 	EBox3DAsyncLineMode Mode = EBox3DAsyncLineMode::Closest;
 	uint64 CategoryBits = MAX_uint64;
 	uint64 MaskBits = MAX_uint64;
@@ -124,12 +237,23 @@ struct BOX3DASYNC_API FBox3DAsyncLineQuery
 	int32 MaxHits = 1;
 	uint64 UserTag = 0;
 	TArray<FBox3DAsyncBodyId> IgnoredBodies;
+	/** Qualified ignore identities reject stale or foreign worlds at submission. */
+	TArray<FBox3DAsyncBodyHandle> IgnoredBodyHandles;
 };
+
+/** General query descriptor; the original name remains available for source compatibility. */
+using FBox3DAsyncQueryDesc = FBox3DAsyncLineQuery;
 
 struct BOX3DASYNC_API FBox3DAsyncLineHit
 {
 	FBox3DAsyncBodyId BodyId = 0;
+	FBox3DAsyncShapeId ShapeId = 0;
+	FBox3DAsyncBodyHandle BodyHandle;
+	FBox3DAsyncShapeHandle ShapeHandle;
+	/** Native b3ShapeType value, or -1 when unavailable. */
+	int32 ShapeType = -1;
 	float Fraction = 1.0f;
+	float Distance = 0.0f;
 	FVector Point = FVector::ZeroVector;
 	FVector Normal = FVector::ZeroVector;
 	uint64 MaterialId = 0;
@@ -142,7 +266,11 @@ struct BOX3DASYNC_API FBox3DAsyncQueryResult
 	FBox3DAsyncQueryHandle Request;
 	uint64 UserTag = 0;
 	uint64 SampledStep = 0;
+	FBox3DAsyncSampleStamp Sample;
+	/** Distinguishes exact overlaps from broad-phase candidates. Overlap hits have no contact data. */
+	EBox3DAsyncQueryKind Kind = EBox3DAsyncQueryKind::Line;
 	EBox3DAsyncQueryStatus Status = EBox3DAsyncQueryStatus::Miss;
+	EBox3DAsyncQueryFailure Failure = EBox3DAsyncQueryFailure::None;
 	TArray<FBox3DAsyncLineHit> Hits;
 };
 
@@ -159,6 +287,34 @@ struct BOX3DASYNC_API FBox3DAsyncDiagnostics
 	int32 OutstandingCreationResults = 0;
 	uint64 ReservedMeshGeometryBytes = 0;
 	int32 RegisteredMeshGeometries = 0;
+	/** Per-world counters reset with the subsystem. Timing uses monotonic seconds. */
+	uint64 AcceptedQueries = 0;
+	uint64 RejectedQueries = 0;
+	uint64 TruncatedQueries = 0;
+	int32 OutstandingQueries = 0;
+	int32 PeakOutstandingQueries = 0;
+	uint64 QueryReservedBytes = 0;
+	uint64 PeakQueryReservedBytes = 0;
+	uint64 ExecutedQueries = 0;
+	double TotalQueryExecutionSeconds = 0.0;
+	double MaxQueryExecutionSeconds = 0.0;
+	uint64 DeliveredQueryResults = 0;
+	double TotalQueryLatencySeconds = 0.0;
+	double MaxQueryLatencySeconds = 0.0;
+	int32 EventIngressBatches = 0;
+	int32 PeakEventIngressBatches = 0;
+	uint64 EventIngressBytes = 0;
+	uint64 PeakEventIngressBytes = 0;
+	int32 EventHistoryBatches = 0;
+	int32 PeakEventHistoryBatches = 0;
+	uint64 EventHistoryBytes = 0;
+	uint64 PeakEventHistoryBytes = 0;
+	uint64 EventBaselineBytes = 0;
+	/** Lost subscription batches and known record counts; unknown losses may contain more records. */
+	uint64 DroppedEventBatches = 0;
+	uint64 DroppedEventRecords = 0;
+	uint64 EventResyncs = 0;
+	uint64 EventBaselineUnavailable = 0;
 };
 
 /**
@@ -169,7 +325,7 @@ struct BOX3DASYNC_API FBox3DAsyncDiagnostics
  * the worker before destroying its native world.
  */
 UCLASS()
-class BOX3DASYNC_API UBox3DAsyncSubsystem : public UWorldSubsystem
+class BOX3DASYNC_API UBox3DAsyncSubsystem : public UTickableWorldSubsystem
 {
 	GENERATED_BODY()
 
@@ -177,6 +333,11 @@ public:
 	static constexpr int32 CommandCapacity = 256;
 	static constexpr int32 OutstandingTraceCapacity = 64;
 	static constexpr int32 OutstandingCreationResultCapacity = 256;
+	/** Query reservations include queued, executing, ready, and unread records. */
+	static constexpr int32 QueryCapacity = 64;
+	static constexpr int32 QueryCapacityPerConsumer = 16;
+	static constexpr uint64 QueryReservedBytes = 2ull * 1024 * 1024;
+	static constexpr uint64 QueryReservedBytesPerConsumer = 512ull * 1024;
 	/// Per-world admission budget for accepted payloads, estimated cook scratch, and retained native meshes. It excludes caller-owned inputs and temporary validation allocations.
 	static constexpr uint64 MaxMeshGeometryBytes = 64ull * 1024ull * 1024ull;
 	virtual ~UBox3DAsyncSubsystem() override;
@@ -185,20 +346,49 @@ public:
 	virtual void Deinitialize() override;
 	virtual bool ShouldCreateSubsystem(UObject* Outer) const override;
 
+	/** Independent owner for actorless creation acknowledgments. */
+	bool TryRegisterCreationConsumer(FBox3DAsyncCreationConsumer& OutConsumer);
+	void UnregisterCreationConsumer(FBox3DAsyncCreationConsumer Consumer);
+	bool TryCreateBody(FBox3DAsyncCreationConsumer Consumer, const FBox3DAsyncBodyDesc& Desc,
+	                   FBox3DAsyncBodyHandle& OutBody);
+	bool TryTakeCreationResult(FBox3DAsyncCreationConsumer Consumer, FBox3DAsyncBodyHandle Body,
+	                           FBox3DAsyncCreationResult& OutResult);
+	/** Query callbacks are dispatched on the game thread in the world subsystem tick. */
+	virtual void Tick(float DeltaTime) override;
+	virtual TStatId GetStatId() const override;
+
 	/** Queue a static box. Half extents are centimeters; transform scale must be one. */
 	bool TryCreateStaticBox(const FTransform& Transform, const FVector& HalfExtents, FBox3DAsyncBodyId& OutBodyId);
 	/** Actorless box with copied filter and event flags. */
 	bool TryCreateStaticBox(const FTransform& Transform, const FVector& HalfExtents,
 	                        const FBox3DAsyncShapeOptions& Options, FBox3DAsyncBodyId& OutBodyId);
+	bool TryCreateStaticBox(const FTransform& Transform, const FVector& HalfExtents,
+	                        const FBox3DAsyncShapeOptions& Options, FBox3DAsyncBodyHandle& OutBody);
 	/** Queue a dynamic sphere. Radius is centimeters and velocity is centimeters per second. */
 	bool TryCreateDynamicSphere(const FTransform& Transform, float Radius, const FVector& InitialVelocity, FBox3DAsyncBodyId& OutBodyId);
 	/** Actorless sphere with copied filter and event flags. */
 	bool TryCreateDynamicSphere(const FTransform& Transform, float Radius, const FVector& InitialVelocity,
 	                            const FBox3DAsyncShapeOptions& Options, FBox3DAsyncBodyId& OutBodyId);
+	bool TryCreateDynamicSphere(const FTransform& Transform, float Radius, const FVector& InitialVelocity,
+	                            const FBox3DAsyncShapeOptions& Options, FBox3DAsyncBodyHandle& OutBody);
 	/** Drain the single raw stream. Removed relationships end at the first subsequent real step.
 	 * Missing identity or a capacity overflow sets a sticky gap; no subsequent events are published.
 	 * Once bOutGap is true the stream is invalid until world teardown. */
 	void DrainRawEvents(TArray<FBox3DAsyncEventBatch>& OutBatches, bool& bOutGap);
+#if WITH_DEV_AUTOMATION_TESTS
+	/** Override the native event-record cap to exercise recovery under sustained pressure. */
+	void SetEventRecordLimitForTest(int32 Limit);
+#endif
+	/** Independent polling subscription. The first delivery is a complete baseline. */
+	bool SubscribeEvents(const FBox3DAsyncEventFilter& Filter, FBox3DAsyncEventSubscription& OutSubscription);
+	/** Callback subscriptions use the same cursor contract and run on the game thread.
+	 * Owner is weak; destruction prevents subsequent callbacks. */
+	bool SubscribeEvents(const FBox3DAsyncEventFilter& Filter, UObject* Owner,
+	                     TFunction<void(const FBox3DAsyncEventDelivery&)> Callback,
+	                     bool bNotifyOnClose, FBox3DAsyncEventSubscription& OutSubscription);
+	void UnsubscribeEvents(FBox3DAsyncEventSubscription Subscription);
+	/** Returns one baseline, delta, or gap/control record. Call again to consume more. */
+	bool PollEvents(FBox3DAsyncEventSubscription Subscription, FBox3DAsyncEventDelivery& OutDelivery);
 	/** Queue copied local-space mesh geometry in centimeters; accepted cooking completes through DrainCreationResults. */
 	bool TryRegisterStaticMeshGeometry(const TArray<FVector>& Vertices, const TArray<int32>& Indices,
 		EBox3DAsyncMeshWinding Winding, FBox3DAsyncGeometryId& OutGeometryId);
@@ -220,6 +410,7 @@ public:
 	bool TryReleaseMeshGeometry(FBox3DAsyncGeometryId GeometryId);
 	/** Queue removal of a previously accepted body ID. */
 	bool TryRemoveBody(FBox3DAsyncBodyId BodyId);
+	bool TryRemoveBody(FBox3DAsyncBodyHandle Body);
 
 	/** Register a polling owner for bounded, independently routed line queries. */
 	bool TryRegisterQueryConsumer(FBox3DAsyncQueryConsumer& OutConsumer);
@@ -227,9 +418,28 @@ public:
 	void UnregisterQueryConsumer(FBox3DAsyncQueryConsumer Consumer);
 	bool TrySubmitQuery(FBox3DAsyncQueryConsumer Consumer, const FBox3DAsyncLineQuery& Query,
 	                    FBox3DAsyncQueryHandle& OutRequest);
+	/** Detailed variant of TrySubmitQuery. Rejected requests have an empty handle. */
+	EBox3DAsyncQueryAdmission SubmitQuery(FBox3DAsyncQueryConsumer Consumer, const FBox3DAsyncLineQuery& Query,
+	                                     FBox3DAsyncQueryHandle& OutRequest);
 	bool TryCancelQuery(FBox3DAsyncQueryConsumer Consumer, FBox3DAsyncQueryHandle Request);
 	bool TryTakeQueryResult(FBox3DAsyncQueryConsumer Consumer, FBox3DAsyncQueryHandle Request,
 	                        FBox3DAsyncQueryResult& OutResult);
+	/** Transfer a request to callback delivery. Owner is weak and must remain valid at dispatch. */
+	bool TrySetQueryCallback(FBox3DAsyncQueryConsumer Consumer, FBox3DAsyncQueryHandle Request,
+	                         UObject* Owner, TFunction<void(const FBox3DAsyncQueryResult&)> Callback);
+	/** Register a game-thread shutdown-window notification for a polling consumer. During the
+	 * notification, committed results and WorldEnded outcomes can still be taken. */
+	bool SetQueryShutdownCallback(FBox3DAsyncQueryConsumer Consumer, UObject* Owner, TFunction<void()> Callback);
+	/** Pump ready query callbacks once; reentrant calls are ignored. */
+	void PumpQueryCallbacks();
+
+#if WITH_DEV_AUTOMATION_TESTS
+	/** Test-only worker gate: 1 before selecting a query, 2 after selection. */
+	void SetQueryTestGate(int32 Gate);
+	int32 GetQueryTestGateReached() const;
+	/** Returns 0 queued, 1 executing, 2 worker-ready, or -1 if absent. */
+	int32 GetQueryTestPhase(FBox3DAsyncQueryHandle Request) const;
+#endif
 
 	/** Queue a closest static-body trace. Start and End are centimeters. */
 	bool TrySubmitLineTrace(const FVector& Start, const FVector& End, FBox3DAsyncTraceRequestId& OutRequestId);
@@ -244,6 +454,13 @@ public:
 	FBox3DAsyncDiagnostics GetDiagnostics() const;
 
 private:
+	void DispatchQueryCallbacks(bool bShutdown);
+	bool TryCreateSimpleBox(const FTransform& Transform, const FVector& HalfExtents,
+	                        const FBox3DAsyncShapeOptions& Options, bool bRequireIdentity, FBox3DAsyncBodyId& OutBodyId);
+	bool TryCreateSimpleSphere(const FTransform& Transform, float Radius, const FVector& InitialVelocity,
+	                           const FBox3DAsyncShapeOptions& Options, bool bRequireIdentity, FBox3DAsyncBodyId& OutBodyId);
+	void PumpEventSubscriptions();
+	void CloseEventSubscriptions();
 	bool TryCreateAuthoredMeshCollision(UStaticMesh* Mesh, const FTransform& Transform, const FVector& Scale,
 		const FVector& InitialVelocity, bool bDynamic, FBox3DAsyncBodyId& OutBodyId);
 	struct FImpl;
