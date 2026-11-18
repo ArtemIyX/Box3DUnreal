@@ -5,10 +5,10 @@
 
 #if WITH_DEV_AUTOMATION_TESTS
 
-#include "Box3DDeform.h"
-#include "Box3DDentMapComponent.h"
-#include "Box3DFracture.h"
-#include "Box3DFracturedActor.h"
+#include "Destruction/Box3DDeform.h"
+#include "Components/Box3DDentMapComponent.h"
+#include "Destruction/Box3DFracture.h"
+#include "Actors/Box3DFracturedActor.h"
 #include "Engine/TextureRenderTarget2D.h"
 #include "HAL/IConsoleManager.h"
 #include "Materials/MaterialInstanceDynamic.h"

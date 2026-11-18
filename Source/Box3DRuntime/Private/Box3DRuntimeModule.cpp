@@ -1,6 +1,6 @@
 #include "Box3DRuntime.h"
 
-#include "Box3DCooking.h"
+#include "Collision/Box3DCooking.h"
 #include "Modules/ModuleManager.h"
 #include "box3d/box3d.h"
 

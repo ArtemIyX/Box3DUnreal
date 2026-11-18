@@ -6,9 +6,9 @@
 
 #if WITH_DEV_AUTOMATION_TESTS
 
-#include "Box3DBreakableActor.h"
-#include "Box3DConveyorActor.h"
-#include "Box3DWindActor.h"
+#include "Actors/Box3DBreakableActor.h"
+#include "Actors/Box3DConveyorActor.h"
+#include "Actors/Box3DWindActor.h"
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FBox3DSpecialBreakableShattersTest,
 	"Box3DUnreal.Special.BreakableShatters", BOX3D_TEST_FLAGS)

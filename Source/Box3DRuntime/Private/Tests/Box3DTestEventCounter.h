@@ -6,8 +6,8 @@
 // instantiated outside tests.
 
 #include "CoreMinimal.h"
-#include "Box3DBodyComponent.h"
-#include "Box3DJointComponent.h"
+#include "Components/Box3DBodyComponent.h"
+#include "Components/Box3DJointComponent.h"
 #include "Box3DTestEventCounter.generated.h"
 
 UCLASS()

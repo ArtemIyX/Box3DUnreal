@@ -5,7 +5,7 @@
 
 #if WITH_DEV_AUTOMATION_TESTS
 
-#include "Box3DConversion.h"
+#include "Simulation/Box3DConversion.h"
 #include "Tests/Box3DTestHelpers.h"
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FBox3DWorldLifecycleTest,

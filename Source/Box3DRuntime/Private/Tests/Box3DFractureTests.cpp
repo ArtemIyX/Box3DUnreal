@@ -7,8 +7,8 @@
 
 #if WITH_DEV_AUTOMATION_TESTS
 
-#include "Box3DConversion.h"
-#include "Box3DFracture.h"
+#include "Simulation/Box3DConversion.h"
+#include "Destruction/Box3DFracture.h"
 #include "Tests/Box3DTestHelpers.h"
 #include "box3d/collision.h"
 

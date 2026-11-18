@@ -5,11 +5,11 @@
 
 #if WITH_DEV_AUTOMATION_TESTS
 
-#include "Box3DFracture.h"
-#include "Box3DFracturedActor.h"
-#include "Box3DQueryLibrary.h"
-#include "Box3DStaticSceneMirror.h"
-#include "Box3DStress.h"
+#include "Destruction/Box3DFracture.h"
+#include "Actors/Box3DFracturedActor.h"
+#include "Collision/Box3DQueryLibrary.h"
+#include "World/Box3DStaticSceneMirror.h"
+#include "Destruction/Box3DStress.h"
 #include "Tests/Box3DTestEventCounter.h"
 #include "Tests/Box3DTestHelpers.h"
 

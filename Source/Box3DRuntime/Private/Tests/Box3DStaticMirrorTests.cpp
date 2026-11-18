@@ -7,8 +7,8 @@
 
 #if WITH_DEV_AUTOMATION_TESTS
 
-#include "Box3DQueryLibrary.h"
-#include "Box3DStaticSceneMirror.h"
+#include "Collision/Box3DQueryLibrary.h"
+#include "World/Box3DStaticSceneMirror.h"
 #include "Components/InstancedStaticMeshComponent.h"
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FBox3DMirrorDiscoveryTest,

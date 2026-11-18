@@ -6,8 +6,8 @@
 
 #if WITH_DEV_AUTOMATION_TESTS
 
-#include "Box3DDestructibleComponent.h"
-#include "Box3DFracturedActor.h"
+#include "Components/Box3DDestructibleComponent.h"
+#include "Actors/Box3DFracturedActor.h"
 #include "Components/StaticMeshComponent.h"
 #include "Engine/StaticMesh.h"
 #include "Tests/Box3DTestHelpers.h"

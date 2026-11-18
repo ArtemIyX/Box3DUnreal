@@ -1,10 +1,10 @@
 #include "Box3DBakeCommandlet.h"
 
 #include "AssetRegistry/AssetRegistryModule.h"
-#include "Box3DCollisionData.h"
+#include "Collision/Box3DCollisionData.h"
 #include "Box3DRuntime.h"
-#include "Box3DSettings.h"
-#include "Box3DStaticSceneMirror.h"
+#include "World/Box3DSettings.h"
+#include "World/Box3DStaticSceneMirror.h"
 #include "Components/InstancedStaticMeshComponent.h"
 #include "Engine/Level.h"
 #include "Engine/StaticMesh.h"

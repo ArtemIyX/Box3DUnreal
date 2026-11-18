@@ -6,8 +6,8 @@
 
 #if WITH_DEV_AUTOMATION_TESTS
 
-#include "Box3DJointComponent.h"
-#include "Box3DPlasticHingeComponent.h"
+#include "Components/Box3DJointComponent.h"
+#include "Components/Box3DPlasticHingeComponent.h"
 #include "Components/SplineMeshComponent.h"
 #include "Tests/Box3DTestEventCounter.h"
 #include "Tests/Box3DTestHelpers.h"

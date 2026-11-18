@@ -5,8 +5,8 @@
 
 #if WITH_DEV_AUTOMATION_TESTS
 
-#include "Box3DConversion.h"
-#include "Box3DSnapshot.h"
+#include "Simulation/Box3DConversion.h"
+#include "Simulation/Box3DSnapshot.h"
 #include "Tests/Box3DTestHelpers.h"
 
 namespace

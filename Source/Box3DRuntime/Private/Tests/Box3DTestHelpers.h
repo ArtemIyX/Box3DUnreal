@@ -4,9 +4,9 @@
 
 #if WITH_DEV_AUTOMATION_TESTS
 
-#include "Box3DBodyComponent.h"
-#include "Box3DSettings.h"
-#include "Box3DWorldSubsystem.h"
+#include "Components/Box3DBodyComponent.h"
+#include "World/Box3DSettings.h"
+#include "World/Box3DWorldSubsystem.h"
 #include "Components/StaticMeshComponent.h"
 #include "Engine/Engine.h"
 #include "Engine/StaticMesh.h"

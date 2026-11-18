@@ -5,7 +5,7 @@
 
 #if WITH_DEV_AUTOMATION_TESTS
 
-#include "Box3DTaskSystem.h"
+#include "World/Box3DTaskSystem.h"
 #include "box3d/collision.h"
 
 namespace

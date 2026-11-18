@@ -5,7 +5,7 @@
 
 #if WITH_DEV_AUTOMATION_TESTS
 
-#include "Box3DGrabComponent.h"
+#include "Components/Box3DGrabComponent.h"
 #include "Tests/Box3DTestHelpers.h"
 
 namespace

@@ -12,9 +12,9 @@
 
 #if WITH_DEV_AUTOMATION_TESTS
 
-#include "Box3DConversion.h"
-#include "Box3DFracturedActor.h"
-#include "Box3DStaticSceneMirror.h"
+#include "Simulation/Box3DConversion.h"
+#include "Actors/Box3DFracturedActor.h"
+#include "World/Box3DStaticSceneMirror.h"
 #include "Components/StaticMeshComponent.h"
 #include "Engine/StaticMesh.h"
 #include "Materials/MaterialInterface.h"

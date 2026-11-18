@@ -5,7 +5,7 @@
 
 #if WITH_DEV_AUTOMATION_TESTS
 
-#include "Box3DDebugDraw.h"
+#include "Diagnostics/Box3DDebugDraw.h"
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FBox3DDiagnosticsWorldStatsTest,
 	"Box3DUnreal.Diagnostics.WorldStats", BOX3D_TEST_FLAGS)

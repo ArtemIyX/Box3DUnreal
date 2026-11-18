@@ -5,10 +5,10 @@
 
 #if WITH_DEV_AUTOMATION_TESTS
 
-#include "Box3DPropActor.h"
-#include "Box3DPropConversion.h"
-#include "Box3DQueryLibrary.h"
-#include "Box3DStaticSceneMirror.h"
+#include "Actors/Box3DPropActor.h"
+#include "Simulation/Box3DPropConversion.h"
+#include "Collision/Box3DQueryLibrary.h"
+#include "World/Box3DStaticSceneMirror.h"
 #include "Components/InstancedStaticMeshComponent.h"
 #include "Engine/StaticMeshActor.h"
 #include "EngineUtils.h"

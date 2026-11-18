@@ -6,8 +6,8 @@
 
 #if WITH_DEV_AUTOMATION_TESTS
 
-#include "Box3DCooking.h"
-#include "Box3DQueryLibrary.h"
+#include "Collision/Box3DCooking.h"
+#include "Collision/Box3DQueryLibrary.h"
 #include "PhysicsEngine/BodySetup.h"
 #include "Tests/Box3DTestHelpers.h"
 

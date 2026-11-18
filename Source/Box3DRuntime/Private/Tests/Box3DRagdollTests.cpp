@@ -5,8 +5,8 @@
 
 #if WITH_DEV_AUTOMATION_TESTS
 
-#include "Box3DConversion.h"
-#include "Box3DRagdoll.h"
+#include "Simulation/Box3DConversion.h"
+#include "Components/Box3DRagdoll.h"
 #include "PhysicsEngine/PhysicsAsset.h"
 #include "PhysicsEngine/PhysicsConstraintTemplate.h"
 #include "PhysicsEngine/SkeletalBodySetup.h"

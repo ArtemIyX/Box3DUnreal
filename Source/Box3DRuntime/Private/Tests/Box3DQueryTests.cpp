@@ -6,7 +6,7 @@
 
 #if WITH_DEV_AUTOMATION_TESTS
 
-#include "Box3DQueryLibrary.h"
+#include "Collision/Box3DQueryLibrary.h"
 #include "Tests/Box3DTestHelpers.h"
 
 namespace

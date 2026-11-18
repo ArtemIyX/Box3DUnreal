@@ -10,11 +10,11 @@
 
 #if WITH_DEV_AUTOMATION_TESTS
 
-#include "Box3DDestructibleComponent.h"
-#include "Box3DDestruction.h"
-#include "Box3DFracturedActor.h"
-#include "Box3DQueryLibrary.h"
-#include "Box3DStaticSceneMirror.h"
+#include "Components/Box3DDestructibleComponent.h"
+#include "Destruction/Box3DDestruction.h"
+#include "Actors/Box3DFracturedActor.h"
+#include "Collision/Box3DQueryLibrary.h"
+#include "World/Box3DStaticSceneMirror.h"
 #include "Tests/Box3DTestHelpers.h"
 
 namespace

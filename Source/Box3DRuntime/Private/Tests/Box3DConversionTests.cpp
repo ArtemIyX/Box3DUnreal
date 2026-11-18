@@ -1,8 +1,8 @@
 // Unit tests for the UE <-> Box3D conversion layer: unit scaling, direction
 // passthrough, quaternion equivalence, and filter bit widening.
 
-#include "Box3DConversion.h"
-#include "Box3DTypes.h"
+#include "Simulation/Box3DConversion.h"
+#include "Simulation/Box3DTypes.h"
 #include "Misc/AutomationTest.h"
 
 #if WITH_DEV_AUTOMATION_TESTS

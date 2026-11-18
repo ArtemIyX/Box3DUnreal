@@ -7,9 +7,9 @@
 
 #if WITH_DEV_AUTOMATION_TESTS
 
-#include "Box3DClothActor.h"
-#include "Box3DConversion.h"
-#include "Box3DRopeActor.h"
+#include "Actors/Box3DClothActor.h"
+#include "Simulation/Box3DConversion.h"
+#include "Actors/Box3DRopeActor.h"
 #include "Components/SplineMeshComponent.h"
 #include "ProceduralMeshComponent.h"
 

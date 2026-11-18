@@ -5,7 +5,7 @@
 
 #if WITH_DEV_AUTOMATION_TESTS
 
-#include "Box3DQueryLibrary.h"
+#include "Collision/Box3DQueryLibrary.h"
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FBox3DExplosionImpulseTest,
 	"Box3DUnreal.World.ExplosionImpulse", BOX3D_TEST_FLAGS)

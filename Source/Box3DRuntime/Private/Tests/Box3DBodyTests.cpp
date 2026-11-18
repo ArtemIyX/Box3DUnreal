@@ -6,8 +6,8 @@
 
 #if WITH_DEV_AUTOMATION_TESTS
 
-#include "Box3DConversion.h"
-#include "Box3DQueryLibrary.h"
+#include "Simulation/Box3DConversion.h"
+#include "Collision/Box3DQueryLibrary.h"
 #include "PhysicalMaterials/PhysicalMaterial.h"
 #include "Tests/Box3DTestHelpers.h"
 
