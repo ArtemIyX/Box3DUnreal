@@ -38,6 +38,8 @@ namespace Box3DAsyncPrivate
 		b3Capsule Capsule{};
 		TArray<b3Vec3> HullPoints;
 		FBox3DAsyncShapeOptions Options;
+		float Friction = 0.6f;
+		float Restitution = 0.0f;
 		uint64 SubshapeKey = 0;
 	};
 
@@ -52,7 +54,7 @@ struct UBox3DAsyncSubsystem::FImpl
 	enum class ECommandType : uint8
 	{
 		CreateBox, CreateSphere, RegisterGeometry, CreateMeshInstance, CreateAuthoredStaticBody,
-		CreateAuthoredDynamicBody, CreateActorlessBody, ReleaseGeometry, Remove
+		CreateAuthoredDynamicBody, CreateActorlessBody, ReleaseGeometry, Remove, BodyCommand, SetField, RemoveField, CreateJoint, RemoveJoint, JointCommand, UpdateJoint, SetBodiesEnabled, GroupImpulse
 	};
 
 	struct FCommand
@@ -63,9 +65,25 @@ struct UBox3DAsyncSubsystem::FImpl
 		FTransform Transform = FTransform::Identity;
 		FVector Dimensions = FVector::ZeroVector;
 		FVector InitialVelocity = FVector::ZeroVector;
+		FVector InitialAngularVelocity = FVector::ZeroVector;
 		float GravityScale = 1.0f;
+		float LinearDamping = 0.0f;
+		float AngularDamping = 0.0f;
+		float MassOverride = 0.0f;
+		bool bEnableSleep = true;
+		bool bStartAwake = true;
+		bool bStartEnabled = true;
+		bool bBullet = false;
 		FVector Scale = FVector::OneVector;
 		FBox3DAsyncShapeOptions ShapeOptions;
+		FBox3DAsyncBodyCommand BodyCommand;
+		FBox3DAsyncFieldDesc Field;
+		uint64 FieldId = 0;
+		uint64 JointId = 0;
+		FBox3DAsyncJointDesc Joint;
+		FBox3DAsyncJointCommand JointControl;
+		TArray<uint64> BodyIds;
+		bool bBodiesEnabled = true;
 		bool bHasShapeOptions = false;
 		int32 ReservedShapeIdentities = 0;
 		uint64 PayloadBytes = 0;
@@ -74,6 +92,7 @@ struct UBox3DAsyncSubsystem::FImpl
 		TArray<Box3DAsyncPrivate::FCopiedStaticShape> StaticShapes;
 		TArray<Box3DAsyncPrivate::FCopiedBodyShape> BodyShapes;
 		bool bDynamic = false;
+		bool bKinematic = false;
 	};
 
 	struct FTraceRequest
@@ -118,6 +137,10 @@ struct UBox3DAsyncSubsystem::FImpl
 
 		b3BodyId NativeId{};
 		bool bDynamic = false;
+		bool bHasDeferredVelocity = false;
+		bool bDeferredStartAwake = true;
+		FVector DeferredLinearVelocity = FVector::ZeroVector;
+		FVector DeferredAngularVelocity = FVector::ZeroVector;
 		FBox3DAsyncGeometryId GeometryId = 0;
 	};
 
@@ -155,6 +178,13 @@ struct UBox3DAsyncSubsystem::FImpl
 	};
 
 	b3WorldId WorldId{};
+	int32 CommandQueueCapacity = UBox3DAsyncSubsystem::CommandCapacity;
+	bool bPublishBodyStates = true;
+	bool bPublishJointStates = true;
+	int32 MaxPersistentFields = 64;
+	float MaxFieldForce = 1.0e12f;
+	int32 MaxJoints = 4096;
+	int32 MaxJointBreakEvents = 1024;
 	float FixedTimeStep = 1.0f / 60.0f;
 	int32 SubStepCount = 1;
 	TAtomic<bool> bStopRequested{false};
@@ -181,6 +211,8 @@ struct UBox3DAsyncSubsystem::FImpl
 	double LatestCompletionTime = 0.0;
 	FCriticalSection QueueMutex;
 	FCriticalSection SnapshotMutex;
+	TSharedPtr<const TMap<uint64, FBox3DAsyncBodyState>, ESPMode::ThreadSafe> LatestBodyStates;
+	TSharedPtr<const TMap<uint64, FBox3DAsyncJointState>, ESPMode::ThreadSafe> LatestJointStates;
 	TArray<FCommand> Commands;
 	TArray<FTraceRequest> TraceRequests;
 	FGuid QueryWorld = FGuid::NewGuid();
@@ -278,6 +310,22 @@ struct UBox3DAsyncSubsystem::FImpl
 	bool bClosingEvents = false;
 	int32 InFlightTraces = 0;
 	TSet<FBox3DAsyncBodyId> AcceptedBodyIds;
+	TSet<uint64> AcceptedFieldIds;
+	uint64 NextFieldId = 1;
+	TMap<uint64, FBox3DAsyncFieldDesc> WorkerFields;
+	uint64 NextJointId = 1;
+	TMap<uint64, EBox3DAsyncJointStatus> JointStatuses;
+	TArray<FBox3DAsyncJointBreakEvent> JointBreakEvents;
+	bool bJointBreakEventGap = false;
+	TMap<uint64, EBox3DAsyncJointType> JointTypes;
+	struct FJoint
+	{
+		b3JointId NativeId{};
+		uint64 BodyA = 0;
+		uint64 BodyB = 0;
+	};
+	TMap<uint64, FJoint> WorkerJoints;
+	TMap<uint64, uint64> JointIdsByNative;
 	TSet<FBox3DAsyncGeometryId> AcceptedGeometryIds;
 	TMap<FBox3DAsyncGeometryId, uint64> GeometryByteReservations;
 

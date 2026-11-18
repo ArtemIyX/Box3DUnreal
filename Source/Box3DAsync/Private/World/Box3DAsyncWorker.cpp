@@ -46,7 +46,8 @@ namespace
 		const b3BodyId Body = b3Shape_GetBody(ShapeId);
 		const b3BodyType Type = b3Body_GetType(Body);
 		if ((Type == b3_staticBody && !Query.bStatic) || (Type == b3_dynamicBody && !Query.bDynamic)
-			|| (Type != b3_staticBody && Type != b3_dynamicBody)) return false;
+			|| (Type == b3_kinematicBody && !Query.bKinematic)
+			|| (Type != b3_staticBody && Type != b3_dynamicBody && Type != b3_kinematicBody)) return false;
 		const bool bSensor = b3Shape_IsSensor(ShapeId);
 		if ((bSensor && !Query.bSensors) || (!bSensor && !Query.bSolids)) return false;
 		const uint64 BodyId = static_cast<uint64>(reinterpret_cast<UPTRINT>(b3Body_GetUserData(Body)));
@@ -180,6 +181,10 @@ uint32 UBox3DAsyncSubsystem::FImpl::FWorker::Run()
 			FMath::CeilToDouble(Remaining * 1000.0), 1.0, double(MAX_uint32 - 1)));
 		Owner.WakeEvent->Wait(WaitMilliseconds);
 	}
+	for (const TPair<uint64, FJoint>& Pair : Owner.WorkerJoints)
+		if (b3Joint_IsValid(Pair.Value.NativeId)) b3DestroyJoint(Pair.Value.NativeId, false);
+	Owner.WorkerJoints.Reset();
+	Owner.JointIdsByNative.Reset();
 	for (const TPair<FBox3DAsyncBodyId, FBody>& Body : Owner.WorkerBodies)
 	{
 		b3DestroyBody(Body.Value.NativeId);
@@ -271,6 +276,19 @@ void UBox3DAsyncSubsystem::FImpl::FWorker::ApplyCommands()
 		return true;
 	};
 
+	auto SetBodyEnabled = [](FBody& Body, bool bEnabled)
+	{
+		if (!bEnabled) { b3Body_Disable(Body.NativeId); return; }
+		b3Body_Enable(Body.NativeId);
+		if (Body.bHasDeferredVelocity)
+		{
+			b3Body_SetLinearVelocity(Body.NativeId, Box3D::ToB3(Body.DeferredLinearVelocity));
+			b3Body_SetAngularVelocity(Body.NativeId, Box3D::ToB3Dir(Body.DeferredAngularVelocity));
+			if (!Body.bDeferredStartAwake) b3Body_SetAwake(Body.NativeId, false);
+			Body.bHasDeferredVelocity = false;
+		}
+	};
+
 	for (FCommand& Command : LocalCommands)
 	{
 		ON_SCOPE_EXIT
@@ -287,11 +305,300 @@ void UBox3DAsyncSubsystem::FImpl::FWorker::ApplyCommands()
 			}
 		};
 
+		if (Command.Type == ECommandType::SetBodiesEnabled)
+		{
+			bool bAllValid = true;
+			for (uint64 Id : Command.BodyIds)
+			{
+				const FBody* Body = Owner.WorkerBodies.Find(Id);
+				if (!Body || !b3Body_IsValid(Body->NativeId)) { bAllValid = false; break; }
+			}
+			if (bAllValid)
+				for (uint64 Id : Command.BodyIds)
+				{
+					FBody& Body = Owner.WorkerBodies.FindChecked(Id);
+					SetBodyEnabled(Body, Command.bBodiesEnabled);
+				}
+			continue;
+		}
+
+		if (Command.Type == ECommandType::GroupImpulse)
+		{
+			double TotalMass = 0.0;
+			bool bAllValid = true;
+			for (uint64 Id : Command.BodyIds)
+			{
+				const FBody* Body = Owner.WorkerBodies.Find(Id);
+				if (!Body || !b3Body_IsValid(Body->NativeId) || b3Body_GetType(Body->NativeId) != b3_dynamicBody)
+				{ bAllValid = false; break; }
+				TotalMass += b3Body_GetMass(Body->NativeId);
+			}
+			if (bAllValid && TotalMass > 0.0)
+				for (uint64 Id : Command.BodyIds)
+				{
+					const b3BodyId NativeId = Owner.WorkerBodies.FindChecked(Id).NativeId;
+					const double Fraction = b3Body_GetMass(NativeId) / TotalMass;
+					b3Body_ApplyLinearImpulseToCenter(NativeId, Box3D::ToB3(Command.BodyCommand.Value * Fraction), true);
+				}
+			continue;
+		}
+
+		if (Command.Type == ECommandType::CreateJoint)
+		{
+			const FBox3DAsyncJointDesc& Input = Command.Joint;
+			const FBody* BodyA = Owner.WorkerBodies.Find(Input.BodyA.Id);
+			const FBody* BodyB = Owner.WorkerBodies.Find(Input.BodyB.Id);
+			b3JointId Id{};
+			if (BodyA && BodyB && b3Body_IsValid(BodyA->NativeId) && b3Body_IsValid(BodyB->NativeId))
+			{
+				auto FillBase = [&Input, BodyA, BodyB](b3JointDef& Base)
+				{
+					Base.bodyIdA = BodyA->NativeId;
+					Base.bodyIdB = BodyB->NativeId;
+					Base.localFrameA = {Box3D::ToB3(Input.LocalFrameA.GetLocation()), Box3D::ToB3(Input.LocalFrameA.GetRotation())};
+					Base.localFrameB = {Box3D::ToB3(Input.LocalFrameB.GetLocation()), Box3D::ToB3(Input.LocalFrameB.GetRotation())};
+					Base.collideConnected = Input.bCollideConnected;
+					if (Input.BreakForce > 0.0f) Base.forceThreshold = Input.BreakForce;
+					if (Input.BreakTorque > 0.0f) Base.torqueThreshold = Input.BreakTorque;
+					if (Input.ConstraintHertz > 0.0f) { Base.constraintHertz = Input.ConstraintHertz; Base.constraintDampingRatio = Input.ConstraintDampingRatio; }
+				};
+				switch (Input.Type)
+				{
+				case EBox3DAsyncJointType::Distance:
+				{
+					b3DistanceJointDef Def = b3DefaultDistanceJointDef(); FillBase(Def.base);
+					Def.length = Input.DistanceLength * Box3D::UEToMeters;
+					Def.enableSpring = Input.bEnableSpring; Def.hertz = Input.SpringHertz; Def.dampingRatio = Input.SpringDampingRatio;
+					Def.enableLimit = Input.bEnableLimit; Def.minLength = FMath::Max(0.0f, Input.LowerLimit) * Box3D::UEToMeters;
+					Def.maxLength = FMath::Max(0.0f, Input.UpperLimit) * Box3D::UEToMeters;
+					Def.enableMotor = Input.bEnableMotor; Def.motorSpeed = Input.MotorSpeed * Box3D::UEToMeters; Def.maxMotorForce = Input.MaxMotorForce;
+					Id = b3CreateDistanceJoint(Owner.WorldId, &Def); break;
+				}
+				case EBox3DAsyncJointType::Revolute:
+				{
+					b3RevoluteJointDef Def = b3DefaultRevoluteJointDef(); FillBase(Def.base);
+					Def.targetAngle = Input.Target; Def.enableSpring = Input.bEnableSpring; Def.hertz = Input.SpringHertz; Def.dampingRatio = Input.SpringDampingRatio;
+					Def.enableLimit = Input.bEnableLimit; Def.lowerAngle = Input.LowerLimit; Def.upperAngle = Input.UpperLimit;
+					Def.enableMotor = Input.bEnableMotor; Def.motorSpeed = Input.MotorSpeed; Def.maxMotorTorque = Input.MaxMotorTorque;
+					Id = b3CreateRevoluteJoint(Owner.WorldId, &Def); break;
+				}
+				case EBox3DAsyncJointType::Prismatic:
+				{
+					b3PrismaticJointDef Def = b3DefaultPrismaticJointDef(); FillBase(Def.base);
+					Def.targetTranslation = Input.Target * Box3D::UEToMeters; Def.enableSpring = Input.bEnableSpring; Def.hertz = Input.SpringHertz; Def.dampingRatio = Input.SpringDampingRatio;
+					Def.enableLimit = Input.bEnableLimit; Def.lowerTranslation = Input.LowerLimit * Box3D::UEToMeters; Def.upperTranslation = Input.UpperLimit * Box3D::UEToMeters;
+					Def.enableMotor = Input.bEnableMotor; Def.motorSpeed = Input.MotorSpeed * Box3D::UEToMeters; Def.maxMotorForce = Input.MaxMotorForce;
+					Id = b3CreatePrismaticJoint(Owner.WorldId, &Def); break;
+				}
+				case EBox3DAsyncJointType::Spherical:
+				{
+					b3SphericalJointDef Def = b3DefaultSphericalJointDef(); FillBase(Def.base);
+					Def.enableSpring = Input.bEnableSpring; Def.hertz = Input.SpringHertz; Def.dampingRatio = Input.SpringDampingRatio;
+					Def.targetRotation = Box3D::ToB3(Input.TargetRotation); Def.enableConeLimit = Input.bEnableConeLimit; Def.coneAngle = Input.ConeAngle;
+					Def.enableTwistLimit = Input.bEnableTwistLimit; Def.lowerTwistAngle = Input.LowerTwist; Def.upperTwistAngle = Input.UpperTwist;
+					Def.enableMotor = Input.bEnableMotor; Def.motorVelocity = Box3D::ToB3Dir(Input.AngularMotorVelocity); Def.maxMotorTorque = Input.MaxMotorTorque;
+					Id = b3CreateSphericalJoint(Owner.WorldId, &Def); break;
+				}
+				case EBox3DAsyncJointType::Weld:
+				{
+					b3WeldJointDef Def = b3DefaultWeldJointDef(); FillBase(Def.base);
+					Def.linearHertz = Input.SpringHertz; Def.linearDampingRatio = Input.SpringDampingRatio;
+					Def.angularHertz = Input.AngularHertz; Def.angularDampingRatio = Input.AngularDampingRatio;
+					Id = b3CreateWeldJoint(Owner.WorldId, &Def); break;
+				}
+				case EBox3DAsyncJointType::Motor:
+				{
+					b3MotorJointDef Def = b3DefaultMotorJointDef(); FillBase(Def.base);
+					Def.linearVelocity = Box3D::ToB3(Input.LinearMotorVelocity); Def.angularVelocity = Box3D::ToB3Dir(Input.AngularMotorVelocity);
+					Def.maxVelocityForce = Input.MaxMotorForce; Def.maxVelocityTorque = Input.MaxMotorTorque;
+					Def.linearHertz = Input.SpringHertz; Def.linearDampingRatio = Input.SpringDampingRatio;
+					Def.angularHertz = Input.AngularHertz; Def.angularDampingRatio = Input.AngularDampingRatio;
+					Def.maxSpringForce = Input.MaxSpringForce; Def.maxSpringTorque = Input.MaxSpringTorque;
+					Id = b3CreateMotorJoint(Owner.WorldId, &Def); break;
+				}
+				case EBox3DAsyncJointType::Wheel:
+				{
+					b3WheelJointDef Def = b3DefaultWheelJointDef(); FillBase(Def.base);
+					Def.enableSuspensionSpring = Input.bEnableSpring; Def.suspensionHertz = Input.SpringHertz; Def.suspensionDampingRatio = Input.SpringDampingRatio;
+					Def.enableSuspensionLimit = Input.bEnableLimit; Def.lowerSuspensionLimit = Input.LowerLimit * Box3D::UEToMeters; Def.upperSuspensionLimit = Input.UpperLimit * Box3D::UEToMeters;
+					Def.enableSpinMotor = Input.bEnableMotor; Def.spinSpeed = Input.MotorSpeed; Def.maxSpinTorque = Input.MaxMotorTorque;
+					Def.enableSteering = Input.bEnableSteering; Def.steeringHertz = Input.SteeringHertz;
+					Def.steeringDampingRatio = Input.SteeringDampingRatio; Def.targetSteeringAngle = Input.TargetSteeringAngle;
+					Def.maxSteeringTorque = Input.MaxSteeringTorque; Def.enableSteeringLimit = Input.bEnableSteeringLimit;
+					Def.lowerSteeringLimit = Input.LowerSteeringLimit; Def.upperSteeringLimit = Input.UpperSteeringLimit;
+					Id = b3CreateWheelJoint(Owner.WorldId, &Def); break;
+				}
+				}
+			}
+			const bool bCreated = b3Joint_IsValid(Id);
+			if (bCreated)
+			{
+				Owner.WorkerJoints.Add(Command.JointId, FJoint{Id, Input.BodyA.Id, Input.BodyB.Id});
+				Owner.JointIdsByNative.Add(b3StoreJointId(Id), Command.JointId);
+			}
+			{
+				FScopeLock Lock(&Owner.QueueMutex);
+				if (EBox3DAsyncJointStatus* Status = Owner.JointStatuses.Find(Command.JointId))
+					if (*Status == EBox3DAsyncJointStatus::Pending) *Status = bCreated ? EBox3DAsyncJointStatus::Active : EBox3DAsyncJointStatus::Failed;
+			}
+			continue;
+		}
+		if (Command.Type == ECommandType::RemoveJoint)
+		{
+			if (FJoint* Joint = Owner.WorkerJoints.Find(Command.JointId))
+			{
+				Owner.JointIdsByNative.Remove(b3StoreJointId(Joint->NativeId));
+				if (b3Joint_IsValid(Joint->NativeId)) b3DestroyJoint(Joint->NativeId, true);
+				Owner.WorkerJoints.Remove(Command.JointId);
+			}
+			{ FScopeLock Lock(&Owner.QueueMutex); Owner.JointStatuses.Remove(Command.JointId); Owner.JointTypes.Remove(Command.JointId); }
+			continue;
+		}
+
+		if (Command.Type == ECommandType::UpdateJoint)
+		{
+			FJoint* Joint = Owner.WorkerJoints.Find(Command.JointId);
+			if (!Joint || !b3Joint_IsValid(Joint->NativeId)) continue;
+			const b3JointId Id = Joint->NativeId;
+			const FBox3DAsyncJointDesc& Input = Command.Joint;
+			b3Joint_SetCollideConnected(Id, Input.bCollideConnected);
+			b3Joint_SetForceThreshold(Id, Input.BreakForce > 0.0f ? Input.BreakForce : std::numeric_limits<float>::max());
+			b3Joint_SetTorqueThreshold(Id, Input.BreakTorque > 0.0f ? Input.BreakTorque : std::numeric_limits<float>::max());
+			const b3JointDef Defaults = b3DefaultWeldJointDef().base;
+			b3Joint_SetConstraintTuning(Id, Input.ConstraintHertz > 0.0f ? Input.ConstraintHertz : Defaults.constraintHertz,
+				Input.ConstraintHertz > 0.0f ? Input.ConstraintDampingRatio : Defaults.constraintDampingRatio);
+			switch (Input.Type)
+			{
+			case EBox3DAsyncJointType::Distance:
+				b3DistanceJoint_SetLength(Id, Input.DistanceLength * Box3D::UEToMeters);
+				b3DistanceJoint_EnableSpring(Id, Input.bEnableSpring); b3DistanceJoint_SetSpringHertz(Id, Input.SpringHertz);
+				b3DistanceJoint_SetSpringDampingRatio(Id, Input.SpringDampingRatio);
+				b3DistanceJoint_EnableLimit(Id, Input.bEnableLimit); b3DistanceJoint_SetLengthRange(Id, FMath::Max(0.0f, Input.LowerLimit) * Box3D::UEToMeters, FMath::Max(0.0f, Input.UpperLimit) * Box3D::UEToMeters);
+				b3DistanceJoint_EnableMotor(Id, Input.bEnableMotor); b3DistanceJoint_SetMotorSpeed(Id, Input.MotorSpeed * Box3D::UEToMeters); b3DistanceJoint_SetMaxMotorForce(Id, Input.MaxMotorForce); break;
+			case EBox3DAsyncJointType::Revolute:
+				b3RevoluteJoint_EnableSpring(Id, Input.bEnableSpring); b3RevoluteJoint_SetSpringHertz(Id, Input.SpringHertz); b3RevoluteJoint_SetSpringDampingRatio(Id, Input.SpringDampingRatio); b3RevoluteJoint_SetTargetAngle(Id, Input.Target);
+				b3RevoluteJoint_EnableLimit(Id, Input.bEnableLimit); b3RevoluteJoint_SetLimits(Id, Input.LowerLimit, Input.UpperLimit);
+				b3RevoluteJoint_EnableMotor(Id, Input.bEnableMotor); b3RevoluteJoint_SetMotorSpeed(Id, Input.MotorSpeed); b3RevoluteJoint_SetMaxMotorTorque(Id, Input.MaxMotorTorque); break;
+			case EBox3DAsyncJointType::Prismatic:
+				b3PrismaticJoint_EnableSpring(Id, Input.bEnableSpring); b3PrismaticJoint_SetSpringHertz(Id, Input.SpringHertz); b3PrismaticJoint_SetSpringDampingRatio(Id, Input.SpringDampingRatio); b3PrismaticJoint_SetTargetTranslation(Id, Input.Target * Box3D::UEToMeters);
+				b3PrismaticJoint_EnableLimit(Id, Input.bEnableLimit); b3PrismaticJoint_SetLimits(Id, Input.LowerLimit * Box3D::UEToMeters, Input.UpperLimit * Box3D::UEToMeters);
+				b3PrismaticJoint_EnableMotor(Id, Input.bEnableMotor); b3PrismaticJoint_SetMotorSpeed(Id, Input.MotorSpeed * Box3D::UEToMeters); b3PrismaticJoint_SetMaxMotorForce(Id, Input.MaxMotorForce); break;
+			case EBox3DAsyncJointType::Spherical:
+				b3SphericalJoint_EnableSpring(Id, Input.bEnableSpring); b3SphericalJoint_SetSpringHertz(Id, Input.SpringHertz); b3SphericalJoint_SetSpringDampingRatio(Id, Input.SpringDampingRatio); b3SphericalJoint_SetTargetRotation(Id, Box3D::ToB3(Input.TargetRotation));
+				b3SphericalJoint_EnableConeLimit(Id, Input.bEnableConeLimit);
+				if (Input.bEnableConeLimit) b3SphericalJoint_SetConeLimit(Id, Input.ConeAngle);
+				b3SphericalJoint_EnableTwistLimit(Id, Input.bEnableTwistLimit); b3SphericalJoint_SetTwistLimits(Id, Input.LowerTwist, Input.UpperTwist);
+				b3SphericalJoint_EnableMotor(Id, Input.bEnableMotor); b3SphericalJoint_SetMotorVelocity(Id, Box3D::ToB3Dir(Input.AngularMotorVelocity)); b3SphericalJoint_SetMaxMotorTorque(Id, Input.MaxMotorTorque); break;
+			case EBox3DAsyncJointType::Weld:
+				b3WeldJoint_SetLinearHertz(Id, Input.SpringHertz); b3WeldJoint_SetLinearDampingRatio(Id, Input.SpringDampingRatio);
+				b3WeldJoint_SetAngularHertz(Id, Input.AngularHertz); b3WeldJoint_SetAngularDampingRatio(Id, Input.AngularDampingRatio); break;
+			case EBox3DAsyncJointType::Motor:
+				b3MotorJoint_SetLinearVelocity(Id, Box3D::ToB3(Input.LinearMotorVelocity)); b3MotorJoint_SetAngularVelocity(Id, Box3D::ToB3Dir(Input.AngularMotorVelocity));
+				b3MotorJoint_SetMaxVelocityForce(Id, Input.MaxMotorForce); b3MotorJoint_SetMaxVelocityTorque(Id, Input.MaxMotorTorque);
+				b3MotorJoint_SetLinearHertz(Id, Input.SpringHertz); b3MotorJoint_SetLinearDampingRatio(Id, Input.SpringDampingRatio);
+				b3MotorJoint_SetAngularHertz(Id, Input.AngularHertz); b3MotorJoint_SetAngularDampingRatio(Id, Input.AngularDampingRatio);
+				b3MotorJoint_SetMaxSpringForce(Id, Input.MaxSpringForce); b3MotorJoint_SetMaxSpringTorque(Id, Input.MaxSpringTorque); break;
+			case EBox3DAsyncJointType::Wheel:
+				b3WheelJoint_EnableSuspension(Id, Input.bEnableSpring); b3WheelJoint_SetSuspensionHertz(Id, Input.SpringHertz); b3WheelJoint_SetSuspensionDampingRatio(Id, Input.SpringDampingRatio);
+				b3WheelJoint_EnableSuspensionLimit(Id, Input.bEnableLimit); b3WheelJoint_SetSuspensionLimits(Id, Input.LowerLimit * Box3D::UEToMeters, Input.UpperLimit * Box3D::UEToMeters);
+				b3WheelJoint_EnableSpinMotor(Id, Input.bEnableMotor); b3WheelJoint_SetSpinMotorSpeed(Id, Input.MotorSpeed); b3WheelJoint_SetMaxSpinTorque(Id, Input.MaxMotorTorque);
+				b3WheelJoint_EnableSteering(Id, Input.bEnableSteering); b3WheelJoint_SetSteeringHertz(Id, Input.SteeringHertz); b3WheelJoint_SetSteeringDampingRatio(Id, Input.SteeringDampingRatio);
+				b3WheelJoint_SetTargetSteeringAngle(Id, Input.TargetSteeringAngle); b3WheelJoint_SetMaxSteeringTorque(Id, Input.MaxSteeringTorque);
+				b3WheelJoint_EnableSteeringLimit(Id, Input.bEnableSteeringLimit); b3WheelJoint_SetSteeringLimits(Id, Input.LowerSteeringLimit, Input.UpperSteeringLimit); break;
+			}
+			continue;
+		}
+
+		if (Command.Type == ECommandType::JointCommand)
+		{
+			FJoint* Joint = Owner.WorkerJoints.Find(Command.JointId);
+			if (!Joint || !b3Joint_IsValid(Joint->NativeId)) continue;
+			const FBox3DAsyncJointCommand& Input = Command.JointControl;
+			const b3JointId Id = Joint->NativeId;
+			switch (Input.Type)
+			{
+			case EBox3DAsyncJointCommandType::SetLength: b3DistanceJoint_SetLength(Id, Input.Scalar * Box3D::UEToMeters); break;
+			case EBox3DAsyncJointCommandType::SetMotorSpeed:
+				switch (Command.Joint.Type)
+				{
+				case EBox3DAsyncJointType::Distance: b3DistanceJoint_SetMotorSpeed(Id, Input.Scalar * Box3D::UEToMeters); break;
+				case EBox3DAsyncJointType::Prismatic: b3PrismaticJoint_SetMotorSpeed(Id, Input.Scalar * Box3D::UEToMeters); break;
+				case EBox3DAsyncJointType::Revolute: b3RevoluteJoint_SetMotorSpeed(Id, Input.Scalar); break;
+				case EBox3DAsyncJointType::Wheel: b3WheelJoint_SetSpinMotorSpeed(Id, Input.Scalar); break;
+				default: break;
+				}
+				break;
+			case EBox3DAsyncJointCommandType::SetLinearMotorVelocity: b3MotorJoint_SetLinearVelocity(Id, Box3D::ToB3(Input.Vector)); break;
+			case EBox3DAsyncJointCommandType::SetAngularMotorVelocity:
+				if (Command.Joint.Type == EBox3DAsyncJointType::Motor) b3MotorJoint_SetAngularVelocity(Id, Box3D::ToB3Dir(Input.Vector));
+				else if (Command.Joint.Type == EBox3DAsyncJointType::Spherical) b3SphericalJoint_SetMotorVelocity(Id, Box3D::ToB3Dir(Input.Vector));
+				break;
+			case EBox3DAsyncJointCommandType::SetSteeringAngle: b3WheelJoint_SetTargetSteeringAngle(Id, Input.Scalar); break;
+			}
+			continue;
+		}
+
+		if (Command.Type == ECommandType::SetField)
+		{
+			Owner.WorkerFields.Add(Command.FieldId, Command.Field);
+			continue;
+		}
+		if (Command.Type == ECommandType::RemoveField)
+		{
+			Owner.WorkerFields.Remove(Command.FieldId);
+			continue;
+		}
+
+		if (Command.Type == ECommandType::BodyCommand)
+		{
+			FBody* Body = Owner.WorkerBodies.Find(Command.BodyId);
+			if (Body == nullptr || !b3Body_IsValid(Body->NativeId)) continue;
+			const FBox3DAsyncBodyCommand& Input = Command.BodyCommand;
+			const b3BodyId Id = Body->NativeId;
+			// Sync and async use the same cm-based force/torque conversions.
+			switch (Input.Type)
+			{
+			case EBox3DAsyncBodyCommandType::SetLinearVelocity: b3Body_SetLinearVelocity(Id, Box3D::ToB3(Input.Value)); break;
+			case EBox3DAsyncBodyCommandType::AddLinearVelocity: b3Body_SetLinearVelocity(Id, b3Add(b3Body_GetLinearVelocity(Id), Box3D::ToB3(Input.Value))); break;
+			case EBox3DAsyncBodyCommandType::SetAngularVelocity: b3Body_SetAngularVelocity(Id, Box3D::ToB3Dir(Input.Value)); break;
+			case EBox3DAsyncBodyCommandType::AddAngularVelocity: b3Body_SetAngularVelocity(Id, b3Add(b3Body_GetAngularVelocity(Id), Box3D::ToB3Dir(Input.Value))); break;
+			case EBox3DAsyncBodyCommandType::ApplyImpulse: b3Body_ApplyLinearImpulseToCenter(Id, Box3D::ToB3Dir(Input.Value * 0.01), Input.bWake); break;
+			case EBox3DAsyncBodyCommandType::ApplyImpulseAtPoint: b3Body_ApplyLinearImpulse(Id, Box3D::ToB3Dir(Input.Value * 0.01), Box3D::ToB3Pos(Input.Point), Input.bWake); break;
+			case EBox3DAsyncBodyCommandType::ApplyForce: b3Body_ApplyForceToCenter(Id, Box3D::ToB3Dir(Input.Value * 0.01), Input.bWake); break;
+			case EBox3DAsyncBodyCommandType::ApplyForceAtPoint: b3Body_ApplyForce(Id, Box3D::ToB3Dir(Input.Value * 0.01), Box3D::ToB3Pos(Input.Point), Input.bWake); break;
+			case EBox3DAsyncBodyCommandType::ApplyTorque: b3Body_ApplyTorque(Id, Box3D::ToB3Dir(Input.Value * 0.0001), Input.bWake); break;
+			case EBox3DAsyncBodyCommandType::ApplyAngularImpulse: b3Body_ApplyAngularImpulse(Id, Box3D::ToB3Dir(Input.Value * 0.0001), Input.bWake); break;
+			case EBox3DAsyncBodyCommandType::SetAwake: b3Body_SetAwake(Id, Input.bEnabled); break;
+			case EBox3DAsyncBodyCommandType::SetKinematicTarget:
+				if (b3Body_GetType(Id) == b3_kinematicBody)
+				{
+					const b3WorldTransform Target = {Box3D::ToB3Pos(Input.Target.GetLocation()), Box3D::ToB3(Input.Target.GetRotation())};
+					b3Body_SetTargetTransform(Id, Target, Input.TargetDuration, Input.bWake);
+				}
+				break;
+			case EBox3DAsyncBodyCommandType::SetEnabled:
+				SetBodyEnabled(*Body, Input.bEnabled);
+				break;
+			}
+			continue;
+		}
+
 		if (Command.Type == ECommandType::Remove)
 		{
 			if (FBody* Body = Owner.WorkerBodies.Find(Command.BodyId))
 			{
 				const FBox3DAsyncGeometryId GeometryId = Body->GeometryId;
+				for (auto It = Owner.WorkerJoints.CreateIterator(); It; ++It)
+				{
+					if (It.Value().BodyA != Command.BodyId && It.Value().BodyB != Command.BodyId) continue;
+					Owner.JointIdsByNative.Remove(b3StoreJointId(It.Value().NativeId));
+					if (b3Joint_IsValid(It.Value().NativeId)) b3DestroyJoint(It.Value().NativeId, true);
+					{ FScopeLock Lock(&Owner.QueueMutex);
+						if (EBox3DAsyncJointStatus* Status = Owner.JointStatuses.Find(It.Key()))
+							if (*Status != EBox3DAsyncJointStatus::RemovalQueued) *Status = EBox3DAsyncJointStatus::Failed;
+					}
+					It.RemoveCurrent();
+				}
 				// Keep generation-qualified shape mappings until the next real step
 				// has copied native destruction and sensor-merge events.
 				Owner.RetiringBodies.Add(Command.BodyId);
@@ -469,11 +776,18 @@ void UBox3DAsyncSubsystem::FImpl::FWorker::ApplyCommands()
 		if (Command.Type == ECommandType::CreateActorlessBody)
 		{
 			b3BodyDef BodyDef = b3DefaultBodyDef();
-			BodyDef.type = Command.bDynamic ? b3_dynamicBody : b3_staticBody;
+			BodyDef.type = Command.bKinematic ? b3_kinematicBody : (Command.bDynamic ? b3_dynamicBody : b3_staticBody);
 			BodyDef.position = Box3D::ToB3Pos(Command.Transform.GetLocation());
 			BodyDef.rotation = Box3D::ToB3(Command.Transform.GetRotation());
 			BodyDef.linearVelocity = Box3D::ToB3(Command.InitialVelocity);
 			BodyDef.gravityScale = Command.GravityScale;
+			BodyDef.angularVelocity = Box3D::ToB3Dir(Command.InitialAngularVelocity);
+			BodyDef.linearDamping = Command.LinearDamping;
+			BodyDef.angularDamping = Command.AngularDamping;
+			BodyDef.enableSleep = Command.bEnableSleep;
+			BodyDef.isAwake = Command.bStartAwake;
+			BodyDef.isEnabled = Command.bStartEnabled;
+			BodyDef.isBullet = Command.bBullet;
 			BodyDef.userData = reinterpret_cast<void*>(static_cast<UPTRINT>(Command.BodyId));
 			const b3BodyId NativeBody = b3CreateBody(Owner.WorldId, &BodyDef);
 			bool bSucceeded = b3Body_IsValid(NativeBody);
@@ -484,11 +798,14 @@ void UBox3DAsyncSubsystem::FImpl::FWorker::ApplyCommands()
 				b3ShapeDef ShapeDef = b3DefaultShapeDef();
 				ShapeDef.filter.categoryBits = Shape.Options.CategoryBits;
 				ShapeDef.filter.maskBits = Shape.Options.MaskBits;
+				ShapeDef.filter.groupIndex = Shape.Options.GroupIndex;
 				ShapeDef.isSensor = Shape.Options.bSensor;
 				ShapeDef.enableSensorEvents = Shape.Options.bSensor || Shape.Options.bDetectableBySensors;
 				ShapeDef.enableContactEvents = Shape.Options.bContactEvents;
 				ShapeDef.enableHitEvents = Shape.Options.bImpactEvents;
 				ShapeDef.density = Shape.Options.Density;
+				ShapeDef.baseMaterial.friction = Shape.Friction;
+				ShapeDef.baseMaterial.restitution = Shape.Restitution;
 				ShapeDef.baseMaterial.userMaterialId = Shape.Options.MaterialId;
 				b3ShapeId ShapeId{};
 				switch (Shape.Type)
@@ -516,7 +833,33 @@ void UBox3DAsyncSubsystem::FImpl::FWorker::ApplyCommands()
 				Owner.PublishCreationResult(EBox3DAsyncCreationKind::Body, Command.BodyId, false);
 				continue;
 			}
-			FinalizeBody(Command, NativeBody, Command.bDynamic, 0, &NativeShapeKeys);
+			if (Command.MassOverride > 0.0f && b3Body_GetType(NativeBody) == b3_dynamicBody)
+			{
+				b3MassData Mass = b3Body_GetMassData(NativeBody);
+				const float Scale = Mass.mass > UE_SMALL_NUMBER ? Command.MassOverride / Mass.mass : 0.0f;
+				if (Scale <= 0.0f || !FMath::IsFinite(Scale))
+				{
+					b3DestroyBody(NativeBody);
+					{ FScopeLock Lock(&Owner.QueueMutex); Owner.AcceptedBodyIds.Remove(Command.BodyId); }
+					{ FScopeLock Lock(&Owner.DiagnosticsMutex); ++Owner.NativeCreationFailures; }
+					Owner.PublishCreationResult(EBox3DAsyncCreationKind::Body, Command.BodyId, false);
+					continue;
+				}
+				Mass.mass *= Scale;
+				Mass.inertia.cx = b3MulSV(Scale, Mass.inertia.cx);
+				Mass.inertia.cy = b3MulSV(Scale, Mass.inertia.cy);
+				Mass.inertia.cz = b3MulSV(Scale, Mass.inertia.cz);
+				b3Body_SetMassData(NativeBody, Mass);
+			}
+			if (FinalizeBody(Command, NativeBody, Command.bDynamic, 0, &NativeShapeKeys)
+				&& !Command.bStartEnabled && Command.bDynamic)
+			{
+				FBody& Body = Owner.WorkerBodies.FindChecked(Command.BodyId);
+				Body.bHasDeferredVelocity = true;
+				Body.bDeferredStartAwake = Command.bStartAwake;
+				Body.DeferredLinearVelocity = Command.InitialVelocity;
+				Body.DeferredAngularVelocity = Command.InitialAngularVelocity;
+			}
 			continue;
 		}
 
@@ -539,6 +882,7 @@ void UBox3DAsyncSubsystem::FImpl::FWorker::ApplyCommands()
 			{
 				ShapeDef.filter.categoryBits = Command.ShapeOptions.CategoryBits;
 				ShapeDef.filter.maskBits = Command.ShapeOptions.MaskBits;
+				ShapeDef.filter.groupIndex = Command.ShapeOptions.GroupIndex;
 				ShapeDef.isSensor = Command.ShapeOptions.bSensor;
 				ShapeDef.enableSensorEvents = Command.ShapeOptions.bSensor || Command.ShapeOptions.bDetectableBySensors;
 				ShapeDef.enableContactEvents = Command.ShapeOptions.bContactEvents;
@@ -627,6 +971,7 @@ void UBox3DAsyncSubsystem::FImpl::FWorker::ApplyCommands()
 		{
 			ShapeDef.filter.categoryBits = Command.ShapeOptions.CategoryBits;
 			ShapeDef.filter.maskBits = Command.ShapeOptions.MaskBits;
+			ShapeDef.filter.groupIndex = Command.ShapeOptions.GroupIndex;
 			ShapeDef.isSensor = Command.ShapeOptions.bSensor;
 			ShapeDef.enableSensorEvents = Command.ShapeOptions.bSensor || Command.ShapeOptions.bDetectableBySensors;
 			ShapeDef.enableContactEvents = Command.ShapeOptions.bContactEvents;
@@ -1228,7 +1573,53 @@ void UBox3DAsyncSubsystem::FImpl::FWorker::StepAndPublish(double ScheduledTime, 
 {
 	if (bAdvanceSimulation)
 	{
+		for (const TPair<uint64, FBox3DAsyncFieldDesc>& Pair : Owner.WorkerFields)
+		{
+			const FBox3DAsyncFieldDesc& Field = Pair.Value;
+			for (const TPair<FBox3DAsyncBodyId, FBody>& BodyPair : Owner.WorkerBodies)
+			{
+				const b3BodyId Id = BodyPair.Value.NativeId;
+				if (!b3Body_IsValid(Id) || b3Body_GetType(Id) != b3_dynamicBody || !b3Body_IsEnabled(Id)) continue;
+				const FVector Position = Box3D::ToUEPos(b3Body_GetTransform(Id).p);
+				const double Distance = Field.Radius > 0.0f ? FVector::Distance(Position, Field.Center) : 0.0;
+				if (Field.Radius > 0.0f && Distance > Field.Radius) continue;
+				const double Weight = Field.Radius > 0.0f && Field.FalloffExponent > 0.0f
+					? FMath::Pow(FMath::Max(0.0, 1.0 - Distance / Field.Radius), double(Field.FalloffExponent)) : 1.0;
+				const FVector Acceleration = Field.Mode == EBox3DAsyncFieldMode::Wind
+					? (Field.Vector - Box3D::ToUE(b3Body_GetLinearVelocity(Id))) * Field.WindDrag : Field.Vector;
+				const FVector Force = Acceleration * (Weight * b3Body_GetMass(Id));
+				if (!Force.ContainsNaN() && !Force.IsNearlyZero())
+					b3Body_ApplyForceToCenter(Id, Box3D::ToB3(Force.GetClampedToMaxSize(Owner.MaxFieldForce)), Field.bWakeBodies);
+			}
+		}
 		b3World_Step(Owner.WorldId, Owner.FixedTimeStep, Owner.SubStepCount);
+		// Copy IDs before destroying any joint: native event storage is invalidated by mutation.
+		TArray<uint64> BrokenIds;
+		const b3JointEvents JointEvents = b3World_GetJointEvents(Owner.WorldId);
+		for (int32 Index = 0; Index < JointEvents.count; ++Index)
+		{
+			const uint64 NativeId = b3StoreJointId(JointEvents.jointEvents[Index].jointId);
+			if (const uint64* Id = Owner.JointIdsByNative.Find(NativeId)) BrokenIds.AddUnique(*Id);
+		}
+		uint64 BreakStep;
+		{ FScopeLock Lock(&Owner.DiagnosticsMutex); BreakStep = Owner.CompletedSteps + 1; }
+		for (uint64 Id : BrokenIds)
+		{
+			if (FJoint* Joint = Owner.WorkerJoints.Find(Id))
+			{
+				Owner.JointIdsByNative.Remove(b3StoreJointId(Joint->NativeId));
+				if (b3Joint_IsValid(Joint->NativeId)) b3DestroyJoint(Joint->NativeId, true);
+				Owner.WorkerJoints.Remove(Id);
+				FScopeLock Lock(&Owner.QueueMutex);
+				if (EBox3DAsyncJointStatus* Status = Owner.JointStatuses.Find(Id))
+					if (*Status != EBox3DAsyncJointStatus::RemovalQueued) *Status = EBox3DAsyncJointStatus::Broken;
+				if (!Owner.bJointBreakEventGap)
+				{
+					if (Owner.JointBreakEvents.Num() >= Owner.MaxJointBreakEvents) Owner.bJointBreakEventGap = true;
+					else Owner.JointBreakEvents.Add({{Owner.QueryWorld, Id}, BreakStep});
+				}
+			}
+		}
 		uint64 CompletedStep;
 		{
 			FScopeLock Lock(&Owner.DiagnosticsMutex);
@@ -1280,18 +1671,54 @@ void UBox3DAsyncSubsystem::FImpl::FWorker::StepAndPublish(double ScheduledTime, 
 		Snapshot.SimulationSample = Owner.CompletedSample;
 	}
 	Snapshot.Poses.Reserve(Owner.WorkerBodies.Num());
+	TSharedPtr<TMap<uint64, FBox3DAsyncBodyState>, ESPMode::ThreadSafe> BodyStates;
+	if (Owner.bPublishBodyStates)
+	{
+		BodyStates = MakeShared<TMap<uint64, FBox3DAsyncBodyState>, ESPMode::ThreadSafe>();
+		BodyStates->Reserve(Owner.WorkerBodies.Num());
+	}
 	for (const TPair<FBox3DAsyncBodyId, FBody>& Pair : Owner.WorkerBodies)
 	{
-		if (!Pair.Value.bDynamic || !b3Body_IsValid(Pair.Value.NativeId))
-		{
-			continue;
-		}
+		if (!b3Body_IsValid(Pair.Value.NativeId)) continue;
 		const b3WorldTransform NativeTransform = b3Body_GetTransform(Pair.Value.NativeId);
+		if (BodyStates.IsValid())
+		{
+			FBox3DAsyncBodyState& State = BodyStates->Add(Pair.Key);
+			State.World = Owner.QueryWorld;
+			State.BodyId = Pair.Key;
+			State.CaptureSerial = Snapshot.CaptureSerial;
+			State.SimulationStep = Snapshot.SimulationSample.Step;
+			State.CaptureMonotonicSeconds = Snapshot.CaptureMonotonicSeconds;
+			State.Transform = FTransform(Box3D::ToUE(NativeTransform.q), Box3D::ToUEPos(NativeTransform.p), FVector::OneVector);
+			State.LinearVelocity = Box3D::ToUE(b3Body_GetLinearVelocity(Pair.Value.NativeId));
+			State.AngularVelocity = Box3D::ToUEDir(b3Body_GetAngularVelocity(Pair.Value.NativeId));
+			State.Mass = b3Body_GetMass(Pair.Value.NativeId);
+			State.bAwake = b3Body_IsAwake(Pair.Value.NativeId);
+			State.bEnabled = b3Body_IsEnabled(Pair.Value.NativeId);
+		}
+		if (!Pair.Value.bDynamic) continue;
 		FBox3DAsyncPose& Pose = Snapshot.Poses.AddDefaulted_GetRef();
 		Pose.BodyId = Pair.Key;
 		Pose.Transform = FTransform(Box3D::ToUE(NativeTransform.q), Box3D::ToUEPos(NativeTransform.p),
 		                            FVector::OneVector);
 		Pose.bAwake = b3Body_IsAwake(Pair.Value.NativeId);
+	}
+	TSharedPtr<TMap<uint64, FBox3DAsyncJointState>, ESPMode::ThreadSafe> JointStates;
+	if (Owner.bPublishJointStates)
+	{
+		JointStates = MakeShared<TMap<uint64, FBox3DAsyncJointState>, ESPMode::ThreadSafe>();
+		JointStates->Reserve(Owner.WorkerJoints.Num());
+		for (const TPair<uint64, FJoint>& Pair : Owner.WorkerJoints)
+		{
+			if (!b3Joint_IsValid(Pair.Value.NativeId)) continue;
+			FBox3DAsyncJointState& State = JointStates->Add(Pair.Key);
+			State.World = Owner.QueryWorld;
+			State.JointId = Pair.Key;
+			State.CaptureSerial = Snapshot.CaptureSerial;
+			State.SimulationStep = Snapshot.SimulationSample.Step;
+			State.ConstraintForce = Box3D::ToUEDir(b3Joint_GetConstraintForce(Pair.Value.NativeId));
+			State.ConstraintTorque = Box3D::ToUEDir(b3Joint_GetConstraintTorque(Pair.Value.NativeId));
+		}
 	}
 	Snapshot.Poses.Sort([](const FBox3DAsyncPose& A, const FBox3DAsyncPose& B)
 	{
@@ -1301,6 +1728,8 @@ void UBox3DAsyncSubsystem::FImpl::FWorker::StepAndPublish(double ScheduledTime, 
 		MoveTemp(Snapshot));
 	{
 		FScopeLock Lock(&Owner.SnapshotMutex);
+		Owner.LatestBodyStates = MoveTemp(BodyStates);
+		Owner.LatestJointStates = MoveTemp(JointStates);
 		Owner.Snapshots.Add(MoveTemp(PublishedSnapshot));
 		if (Owner.Snapshots.Num() > SnapshotCapacity)
 		{

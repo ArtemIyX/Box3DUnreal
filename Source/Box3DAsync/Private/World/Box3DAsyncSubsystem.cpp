@@ -1,6 +1,7 @@
 #include "World/Box3DAsyncSubsystem.h"
 
 #include "Box3DAsyncSubsystemImpl.h"
+#include "World/Box3DAsyncSettings.h"
 #include "Engine/World.h"
 #include "Engine/StaticMesh.h"
 #include "PhysicsEngine/BodySetup.h"
@@ -385,6 +386,14 @@ void UBox3DAsyncSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 		return;
 	}
 
+	const UBox3DAsyncSettings* AsyncSettings = GetDefault<UBox3DAsyncSettings>();
+	Impl->CommandQueueCapacity = FMath::Clamp(AsyncSettings->CommandQueueCapacity, 1, CommandCapacity);
+	Impl->bPublishBodyStates = AsyncSettings->bPublishBodyStates;
+	Impl->bPublishJointStates = AsyncSettings->bPublishJointStates;
+	Impl->MaxPersistentFields = FMath::Clamp(AsyncSettings->MaxPersistentFields, 1, 1024);
+	Impl->MaxFieldForce = FMath::IsFinite(AsyncSettings->MaxFieldForce) ? FMath::Clamp(AsyncSettings->MaxFieldForce, 1.0f, 1.0e12f) : 1.0e12f;
+	Impl->MaxJoints = FMath::Clamp(AsyncSettings->MaxJoints, 1, 65536);
+	Impl->MaxJointBreakEvents = FMath::Clamp(AsyncSettings->MaxJointBreakEvents, 1, 65536);
 	Impl->FixedTimeStep = Settings->FixedTimeStep;
 	Impl->SubStepCount = FMath::Clamp(Settings->SubStepCount, 1, 16);
 	const b3Vec3 NativeGravity = Box3D::ToB3Accel(Settings->Gravity);
@@ -526,7 +535,7 @@ bool UBox3DAsyncSubsystem::TryCreateSimpleBox(const FTransform& Transform, const
 		return false;
 	}
 	FScopeLock Lock(&Impl->QueueMutex);
-	if (!Impl->bAccepting || Impl->Commands.Num() >= CommandCapacity || Impl->NextBodyId == 0)
+	if (!Impl->bAccepting || Impl->Commands.Num() >= Impl->CommandQueueCapacity || Impl->NextBodyId == 0)
 	{
 		return false;
 	}
@@ -594,7 +603,7 @@ bool UBox3DAsyncSubsystem::TryCreateSimpleSphere(const FTransform& Transform, fl
 		return false;
 	}
 	FScopeLock Lock(&Impl->QueueMutex);
-	if (!Impl->bAccepting || Impl->Commands.Num() >= CommandCapacity || Impl->NextBodyId == 0)
+	if (!Impl->bAccepting || Impl->Commands.Num() >= Impl->CommandQueueCapacity || Impl->NextBodyId == 0)
 	{
 		return false;
 	}
@@ -659,7 +668,7 @@ bool UBox3DAsyncSubsystem::TryRegisterStaticMeshGeometry(const TArray<FVector>& 
 		+ PreflightVertexCount * 32ull;
 
 	FScopeLock Lock(&Impl->QueueMutex);
-	if (!Impl->bAccepting || Impl->Commands.Num() >= CommandCapacity || Impl->NextGeometryId == 0
+	if (!Impl->bAccepting || Impl->Commands.Num() >= Impl->CommandQueueCapacity || Impl->NextGeometryId == 0
 		|| Impl->OutstandingCreationResults >= OutstandingCreationResultCapacity
 		|| GeometryReservationBytes > MaxMeshGeometryBytes - Impl->ReservedGeometryBytes)
 	{
@@ -829,7 +838,7 @@ bool UBox3DAsyncSubsystem::TryCreateAuthoredMeshCollision(UStaticMesh* Mesh, con
 	}
 
 	FScopeLock Lock(&Impl->QueueMutex);
-	if (!Impl->bAccepting || Impl->Commands.Num() >= CommandCapacity || Impl->NextBodyId == 0
+	if (!Impl->bAccepting || Impl->Commands.Num() >= Impl->CommandQueueCapacity || Impl->NextBodyId == 0
 		|| Impl->OutstandingCreationResults >= OutstandingCreationResultCapacity
 		|| PayloadBytes > MaxMeshGeometryBytes - Impl->ReservedStaticShapeBytes)
 	{
@@ -857,7 +866,7 @@ bool UBox3DAsyncSubsystem::TryCreateStaticMeshInstance(FBox3DAsyncGeometryId Geo
 		return false;
 	}
 	FScopeLock Lock(&Impl->QueueMutex);
-	if (!Impl->bAccepting || Impl->Commands.Num() >= CommandCapacity || Impl->NextBodyId == 0
+	if (!Impl->bAccepting || Impl->Commands.Num() >= Impl->CommandQueueCapacity || Impl->NextBodyId == 0
 		|| !Impl->AcceptedGeometryIds.Contains(GeometryId)
 		|| Impl->OutstandingCreationResults >= OutstandingCreationResultCapacity)
 	{
@@ -889,7 +898,7 @@ bool UBox3DAsyncSubsystem::TryReleaseMeshGeometry(FBox3DAsyncGeometryId Geometry
 		return false;
 	}
 	FScopeLock Lock(&Impl->QueueMutex);
-	if (!Impl->bAccepting || Impl->Commands.Num() >= CommandCapacity
+	if (!Impl->bAccepting || Impl->Commands.Num() >= Impl->CommandQueueCapacity
 		|| !Impl->AcceptedGeometryIds.Contains(GeometryId)
 		|| Impl->OutstandingCreationResults >= OutstandingCreationResultCapacity)
 	{
@@ -913,7 +922,7 @@ bool UBox3DAsyncSubsystem::TryRemoveBody(FBox3DAsyncBodyId BodyId)
 		return false;
 	}
 	FScopeLock Lock(&Impl->QueueMutex);
-	if (!Impl->bAccepting || Impl->Commands.Num() >= CommandCapacity || !Impl->AcceptedBodyIds.Contains(BodyId))
+	if (!Impl->bAccepting || Impl->Commands.Num() >= Impl->CommandQueueCapacity || !Impl->AcceptedBodyIds.Contains(BodyId))
 	{
 		return false;
 	}
@@ -929,6 +938,293 @@ bool UBox3DAsyncSubsystem::TryRemoveBody(FBox3DAsyncBodyHandle Body)
 {
 	check(IsInGameThread());
 	return Impl.IsValid() && Body.World == Impl->QueryWorld && Body.Id != 0 && TryRemoveBody(Body.Id);
+}
+
+bool UBox3DAsyncSubsystem::TrySubmitBodyCommand(FBox3DAsyncBodyHandle Body,
+	const FBox3DAsyncBodyCommand& Command)
+{
+	check(IsInGameThread());
+	if (!Impl.IsValid() || Body.World != Impl->QueryWorld || Body.Id == 0
+		|| Command.Value.ContainsNaN() || Command.Point.ContainsNaN()
+		|| Command.Value.GetAbsMax() > 1.0e9 || Command.Point.GetAbsMax() > 1.0e9
+		|| static_cast<uint8>(Command.Type) > static_cast<uint8>(EBox3DAsyncBodyCommandType::SetKinematicTarget)) return false;
+	if (Command.Type == EBox3DAsyncBodyCommandType::SetKinematicTarget
+		&& (Command.Target.ContainsNaN() || !Command.Target.GetRotation().IsNormalized()
+			|| !Command.Target.GetScale3D().Equals(FVector::OneVector, KINDA_SMALL_NUMBER)
+			|| Command.Target.GetLocation().GetAbsMax() > 1.0e9
+			|| !FMath::IsFinite(Command.TargetDuration) || Command.TargetDuration < 0.001f)) return false;
+	FScopeLock Lock(&Impl->QueueMutex);
+	if (!Impl->bAccepting || Impl->Commands.Num() >= Impl->CommandQueueCapacity
+		|| !Impl->AcceptedBodyIds.Contains(Body.Id)) return false;
+	FImpl::FCommand& Pending = Impl->Commands.AddDefaulted_GetRef();
+	Pending.Type = FImpl::ECommandType::BodyCommand;
+	Pending.BodyId = Body.Id;
+	Pending.BodyCommand = Command;
+	Impl->WakeEvent->Trigger();
+	return true;
+}
+
+bool UBox3DAsyncSubsystem::TrySetBodiesEnabled(const TArray<FBox3DAsyncBodyHandle>& Bodies, bool bEnabled)
+{
+	check(IsInGameThread());
+	if (!Impl.IsValid() || Bodies.IsEmpty() || Bodies.Num() > 256) return false;
+	TSet<uint64> Ids;
+	for (const FBox3DAsyncBodyHandle& Body : Bodies)
+	{
+		if (Body.World != Impl->QueryWorld || Body.Id == 0 || Ids.Contains(Body.Id)) return false;
+		Ids.Add(Body.Id);
+	}
+	FScopeLock Lock(&Impl->QueueMutex);
+	if (!Impl->bAccepting || Impl->Commands.Num() >= Impl->CommandQueueCapacity) return false;
+	for (uint64 Id : Ids) if (!Impl->AcceptedBodyIds.Contains(Id)) return false;
+	FImpl::FCommand& Command = Impl->Commands.AddDefaulted_GetRef();
+	Command.Type = FImpl::ECommandType::SetBodiesEnabled;
+	Command.bBodiesEnabled = bEnabled;
+	for (const FBox3DAsyncBodyHandle& Body : Bodies) Command.BodyIds.Add(Body.Id);
+	Impl->WakeEvent->Trigger();
+	return true;
+}
+
+bool UBox3DAsyncSubsystem::TryApplyGroupImpulse(const TArray<FBox3DAsyncBodyHandle>& Bodies, FVector Impulse)
+{
+	check(IsInGameThread());
+	if (!Impl.IsValid() || Bodies.IsEmpty() || Bodies.Num() > 256 || !IsFiniteVector(Impulse) || Impulse.GetAbsMax() > 1.0e9) return false;
+	TSet<uint64> Ids;
+	for (const FBox3DAsyncBodyHandle& Body : Bodies)
+	{
+		if (Body.World != Impl->QueryWorld || Body.Id == 0 || Ids.Contains(Body.Id)) return false;
+		Ids.Add(Body.Id);
+	}
+	FScopeLock Lock(&Impl->QueueMutex);
+	if (!Impl->bAccepting || Impl->Commands.Num() >= Impl->CommandQueueCapacity) return false;
+	for (uint64 Id : Ids) if (!Impl->AcceptedBodyIds.Contains(Id)) return false;
+	FImpl::FCommand& Command = Impl->Commands.AddDefaulted_GetRef();
+	Command.Type = FImpl::ECommandType::GroupImpulse;
+	Command.BodyCommand.Value = Impulse;
+	for (const FBox3DAsyncBodyHandle& Body : Bodies) Command.BodyIds.Add(Body.Id);
+	Impl->WakeEvent->Trigger();
+	return true;
+}
+
+namespace
+{
+	bool IsValidField(const FBox3DAsyncFieldDesc& Field)
+	{
+		return static_cast<uint8>(Field.Mode) <= static_cast<uint8>(EBox3DAsyncFieldMode::Wind)
+			&& IsFiniteVector(Field.Center) && Field.Center.GetAbsMax() <= 1.0e9
+			&& IsFiniteVector(Field.Vector) && Field.Vector.GetAbsMax() <= 1.0e7
+			&& FMath::IsFinite(Field.Radius) && Field.Radius >= 0.0f && Field.Radius <= 1.0e9f
+			&& FMath::IsFinite(Field.WindDrag) && Field.WindDrag >= 0.0f && Field.WindDrag <= 1000.0f
+			&& FMath::IsFinite(Field.FalloffExponent) && Field.FalloffExponent >= 0.0f && Field.FalloffExponent <= 16.0f;
+	}
+}
+
+bool UBox3DAsyncSubsystem::TryCreateField(const FBox3DAsyncFieldDesc& Desc, FBox3DAsyncFieldHandle& OutField)
+{
+	check(IsInGameThread());
+	OutField = {};
+	if (!Impl.IsValid() || !IsValidField(Desc)) return false;
+	FScopeLock Lock(&Impl->QueueMutex);
+	if (!Impl->bAccepting || Impl->NextFieldId == 0 || Impl->Commands.Num() >= Impl->CommandQueueCapacity
+		|| Impl->AcceptedFieldIds.Num() >= Impl->MaxPersistentFields) return false;
+	const uint64 Id = Impl->NextFieldId++;
+	FImpl::FCommand& Command = Impl->Commands.AddDefaulted_GetRef();
+	Command.Type = FImpl::ECommandType::SetField;
+	Command.FieldId = Id;
+	Command.Field = Desc;
+	Impl->AcceptedFieldIds.Add(Id);
+	OutField = {Impl->QueryWorld, Id};
+	Impl->WakeEvent->Trigger();
+	return true;
+}
+
+bool UBox3DAsyncSubsystem::TryUpdateField(FBox3DAsyncFieldHandle Field, const FBox3DAsyncFieldDesc& Desc)
+{
+	check(IsInGameThread());
+	if (!Impl.IsValid() || Field.World != Impl->QueryWorld || Field.Id == 0 || !IsValidField(Desc)) return false;
+	FScopeLock Lock(&Impl->QueueMutex);
+	if (!Impl->bAccepting || !Impl->AcceptedFieldIds.Contains(Field.Id) || Impl->Commands.Num() >= Impl->CommandQueueCapacity) return false;
+	FImpl::FCommand& Command = Impl->Commands.AddDefaulted_GetRef();
+	Command.Type = FImpl::ECommandType::SetField;
+	Command.FieldId = Field.Id;
+	Command.Field = Desc;
+	Impl->WakeEvent->Trigger();
+	return true;
+}
+
+bool UBox3DAsyncSubsystem::TryRemoveField(FBox3DAsyncFieldHandle Field)
+{
+	check(IsInGameThread());
+	if (!Impl.IsValid() || Field.World != Impl->QueryWorld || Field.Id == 0) return false;
+	FScopeLock Lock(&Impl->QueueMutex);
+	if (!Impl->bAccepting || !Impl->AcceptedFieldIds.Contains(Field.Id) || Impl->Commands.Num() >= Impl->CommandQueueCapacity) return false;
+	FImpl::FCommand& Command = Impl->Commands.AddDefaulted_GetRef();
+	Command.Type = FImpl::ECommandType::RemoveField;
+	Command.FieldId = Field.Id;
+	Impl->AcceptedFieldIds.Remove(Field.Id);
+	Impl->WakeEvent->Trigger();
+	return true;
+}
+
+namespace
+{
+	bool IsValidJointDesc(const FBox3DAsyncJointDesc& D)
+	{
+		auto ValidFrame = [](const FTransform& T)
+		{
+			return !T.ContainsNaN() && T.GetRotation().IsNormalized() && T.GetLocation().GetAbsMax() <= 1.0e9
+				&& T.GetScale3D().Equals(FVector::OneVector, KINDA_SMALL_NUMBER);
+		};
+		const float Values[] = {D.SpringHertz, D.SpringDampingRatio, D.LowerLimit, D.UpperLimit, D.MotorSpeed,
+			D.MaxMotorForce, D.MaxMotorTorque, D.DistanceLength, D.Target, D.AngularHertz,
+			D.AngularDampingRatio, D.ConeAngle, D.LowerTwist, D.UpperTwist, D.BreakForce, D.BreakTorque,
+			D.ConstraintHertz, D.ConstraintDampingRatio, D.MaxSpringForce, D.MaxSpringTorque, D.SteeringHertz,
+			D.SteeringDampingRatio, D.TargetSteeringAngle, D.MaxSteeringTorque, D.LowerSteeringLimit, D.UpperSteeringLimit};
+		for (float Value : Values) if (!FMath::IsFinite(Value) || FMath::Abs(Value) > 1.0e7f) return false;
+		return static_cast<uint8>(D.Type) <= static_cast<uint8>(EBox3DAsyncJointType::Wheel)
+			&& ValidFrame(D.LocalFrameA) && ValidFrame(D.LocalFrameB)
+			&& D.TargetRotation.IsNormalized() && !D.TargetRotation.ContainsNaN()
+			&& IsFiniteVector(D.LinearMotorVelocity) && D.LinearMotorVelocity.GetAbsMax() <= 1.0e7
+			&& IsFiniteVector(D.AngularMotorVelocity) && D.AngularMotorVelocity.GetAbsMax() <= 1.0e7
+			&& D.SpringHertz >= 0 && D.SpringDampingRatio >= 0 && D.AngularHertz >= 0 && D.AngularDampingRatio >= 0
+			&& D.MaxMotorForce >= 0 && D.MaxMotorTorque >= 0 && D.BreakForce >= 0 && D.BreakTorque >= 0 && D.DistanceLength >= 0.0001f
+			&& D.ConstraintHertz >= 0 && D.ConstraintDampingRatio >= 0 && D.MaxSpringForce >= 0 && D.MaxSpringTorque >= 0
+			&& D.SteeringHertz >= 0 && D.SteeringDampingRatio >= 0 && D.MaxSteeringTorque >= 0
+			&& D.LowerSteeringLimit <= D.UpperSteeringLimit
+			&& (D.Type != EBox3DAsyncJointType::Distance || !D.bEnableLimit || D.LowerLimit >= 0)
+			&& D.LowerLimit <= D.UpperLimit
+			&& (!D.bEnableTwistLimit || D.LowerTwist <= D.UpperTwist)
+			&& D.ConeAngle >= 0 && D.ConeAngle <= 0.99f * PI;
+	}
+}
+
+bool UBox3DAsyncSubsystem::TryCreateJoint(const FBox3DAsyncJointDesc& Desc, FBox3DAsyncJointHandle& OutJoint)
+{
+	check(IsInGameThread());
+	OutJoint = {};
+	if (!Impl.IsValid() || !IsValidJointDesc(Desc) || Desc.BodyA.World != Impl->QueryWorld
+		|| Desc.BodyB.World != Impl->QueryWorld || Desc.BodyA.Id == 0 || Desc.BodyB.Id == 0
+		|| Desc.BodyA.Id == Desc.BodyB.Id) return false;
+	FScopeLock Lock(&Impl->QueueMutex);
+	if (!Impl->bAccepting || Impl->NextJointId == 0 || Impl->Commands.Num() >= Impl->CommandQueueCapacity
+		|| Impl->JointStatuses.Num() >= Impl->MaxJoints || !Impl->AcceptedBodyIds.Contains(Desc.BodyA.Id)
+		|| !Impl->AcceptedBodyIds.Contains(Desc.BodyB.Id)) return false;
+	const uint64 Id = Impl->NextJointId++;
+	FImpl::FCommand& Command = Impl->Commands.AddDefaulted_GetRef();
+	Command.Type = FImpl::ECommandType::CreateJoint;
+	Command.JointId = Id;
+	Command.Joint = Desc;
+	Impl->JointStatuses.Add(Id, EBox3DAsyncJointStatus::Pending);
+	Impl->JointTypes.Add(Id, Desc.Type);
+	OutJoint = {Impl->QueryWorld, Id};
+	Impl->WakeEvent->Trigger();
+	return true;
+}
+
+EBox3DAsyncJointStatus UBox3DAsyncSubsystem::GetJointStatus(FBox3DAsyncJointHandle Joint) const
+{
+	check(IsInGameThread());
+	if (!Impl.IsValid() || Joint.World != Impl->QueryWorld || Joint.Id == 0) return EBox3DAsyncJointStatus::Unavailable;
+	FScopeLock Lock(&Impl->QueueMutex);
+	const EBox3DAsyncJointStatus* Status = Impl->JointStatuses.Find(Joint.Id);
+	return Status ? *Status : EBox3DAsyncJointStatus::Unavailable;
+}
+
+bool UBox3DAsyncSubsystem::TryGetLatestJointState(FBox3DAsyncJointHandle Joint, FBox3DAsyncJointState& OutState) const
+{
+	check(IsInGameThread());
+	OutState = {};
+	if (GetJointStatus(Joint) != EBox3DAsyncJointStatus::Active) return false;
+	TSharedPtr<const TMap<uint64, FBox3DAsyncJointState>, ESPMode::ThreadSafe> States;
+	{
+		FScopeLock Lock(&Impl->SnapshotMutex);
+		States = Impl->LatestJointStates;
+	}
+	if (!States.IsValid()) return false;
+	if (const FBox3DAsyncJointState* State = States->Find(Joint.Id))
+	{
+		OutState = *State;
+		return true;
+	}
+	return false;
+}
+
+bool UBox3DAsyncSubsystem::TrySubmitJointCommand(FBox3DAsyncJointHandle Joint, const FBox3DAsyncJointCommand& Control)
+{
+	check(IsInGameThread());
+	if (!Impl.IsValid() || Joint.World != Impl->QueryWorld || Joint.Id == 0
+		|| !FMath::IsFinite(Control.Scalar) || FMath::Abs(Control.Scalar) > 1.0e7f
+		|| !IsFiniteVector(Control.Vector) || Control.Vector.GetAbsMax() > 1.0e7
+		|| static_cast<uint8>(Control.Type) > static_cast<uint8>(EBox3DAsyncJointCommandType::SetSteeringAngle)) return false;
+	FScopeLock Lock(&Impl->QueueMutex);
+	const EBox3DAsyncJointStatus* Status = Impl->JointStatuses.Find(Joint.Id);
+	const EBox3DAsyncJointType* Type = Impl->JointTypes.Find(Joint.Id);
+	if (!Impl->bAccepting || !Status || !Type || (*Status != EBox3DAsyncJointStatus::Pending && *Status != EBox3DAsyncJointStatus::Active)
+		|| Impl->Commands.Num() >= Impl->CommandQueueCapacity) return false;
+	bool bSupported = false;
+	switch (Control.Type)
+	{
+	case EBox3DAsyncJointCommandType::SetLength: bSupported = *Type == EBox3DAsyncJointType::Distance && Control.Scalar >= 0.0001f; break;
+	case EBox3DAsyncJointCommandType::SetMotorSpeed: bSupported = *Type == EBox3DAsyncJointType::Distance || *Type == EBox3DAsyncJointType::Revolute || *Type == EBox3DAsyncJointType::Prismatic || *Type == EBox3DAsyncJointType::Wheel; break;
+	case EBox3DAsyncJointCommandType::SetLinearMotorVelocity: bSupported = *Type == EBox3DAsyncJointType::Motor; break;
+	case EBox3DAsyncJointCommandType::SetAngularMotorVelocity: bSupported = *Type == EBox3DAsyncJointType::Motor || *Type == EBox3DAsyncJointType::Spherical; break;
+	case EBox3DAsyncJointCommandType::SetSteeringAngle: bSupported = *Type == EBox3DAsyncJointType::Wheel; break;
+	}
+	if (!bSupported) return false;
+	FImpl::FCommand& Pending = Impl->Commands.AddDefaulted_GetRef();
+	Pending.Type = FImpl::ECommandType::JointCommand;
+	Pending.JointId = Joint.Id;
+	Pending.JointControl = Control;
+	Pending.Joint.Type = *Type;
+	Impl->WakeEvent->Trigger();
+	return true;
+}
+
+bool UBox3DAsyncSubsystem::TryUpdateJoint(FBox3DAsyncJointHandle Joint, const FBox3DAsyncJointDesc& Settings)
+{
+	check(IsInGameThread());
+	if (!Impl.IsValid() || Joint.World != Impl->QueryWorld || Joint.Id == 0 || !IsValidJointDesc(Settings)
+		|| (Settings.Type == EBox3DAsyncJointType::Spherical && Settings.bEnableConeLimit && Settings.ConeAngle > 0.5f * PI)
+		|| (Settings.Type == EBox3DAsyncJointType::Revolute && FMath::Abs(Settings.Target) > PI)) return false;
+	FScopeLock Lock(&Impl->QueueMutex);
+	const EBox3DAsyncJointStatus* Status = Impl->JointStatuses.Find(Joint.Id);
+	const EBox3DAsyncJointType* Type = Impl->JointTypes.Find(Joint.Id);
+	if (!Impl->bAccepting || !Status || !Type || *Type != Settings.Type
+		|| (*Status != EBox3DAsyncJointStatus::Pending && *Status != EBox3DAsyncJointStatus::Active)
+		|| Impl->Commands.Num() >= Impl->CommandQueueCapacity) return false;
+	FImpl::FCommand& Pending = Impl->Commands.AddDefaulted_GetRef();
+	Pending.Type = FImpl::ECommandType::UpdateJoint;
+	Pending.JointId = Joint.Id;
+	Pending.Joint = Settings;
+	Impl->WakeEvent->Trigger();
+	return true;
+}
+
+bool UBox3DAsyncSubsystem::TryRemoveJoint(FBox3DAsyncJointHandle Joint)
+{
+	check(IsInGameThread());
+	if (!Impl.IsValid() || Joint.World != Impl->QueryWorld || Joint.Id == 0) return false;
+	FScopeLock Lock(&Impl->QueueMutex);
+	EBox3DAsyncJointStatus* Status = Impl->JointStatuses.Find(Joint.Id);
+	if (!Impl->bAccepting || !Status || *Status == EBox3DAsyncJointStatus::RemovalQueued
+		|| Impl->Commands.Num() >= Impl->CommandQueueCapacity) return false;
+	FImpl::FCommand& Command = Impl->Commands.AddDefaulted_GetRef();
+	Command.Type = FImpl::ECommandType::RemoveJoint;
+	Command.JointId = Joint.Id;
+	*Status = EBox3DAsyncJointStatus::RemovalQueued;
+	Impl->WakeEvent->Trigger();
+	return true;
+}
+
+void UBox3DAsyncSubsystem::DrainJointBreakEvents(TArray<FBox3DAsyncJointBreakEvent>& OutEvents, bool& bOutGap)
+{
+	check(IsInGameThread());
+	OutEvents.Reset();
+	bOutGap = true;
+	if (!Impl.IsValid()) return;
+	FScopeLock Lock(&Impl->QueueMutex);
+	Swap(OutEvents, Impl->JointBreakEvents);
+	bOutGap = Impl->bJointBreakEventGap;
 }
 
 #if WITH_DEV_AUTOMATION_TESTS
@@ -1460,6 +1756,29 @@ bool UBox3DAsyncSubsystem::TryGetLatestPoseFrame(FBox3DAsyncPoseFrame& OutFrame)
 	OutFrame.SimulationSample = LatestSnapshot->SimulationSample;
 	OutFrame.Poses = LatestSnapshot->Poses;
 	return true;
+}
+
+bool UBox3DAsyncSubsystem::TryGetLatestBodyState(FBox3DAsyncBodyHandle Body, FBox3DAsyncBodyState& OutState) const
+{
+	check(IsInGameThread());
+	OutState = {};
+	if (!Impl.IsValid() || Body.World != Impl->QueryWorld || Body.Id == 0) return false;
+	{
+		FScopeLock Lock(&Impl->QueueMutex);
+		if (!Impl->bAccepting || !Impl->AcceptedBodyIds.Contains(Body.Id)) return false;
+	}
+	TSharedPtr<const TMap<uint64, FBox3DAsyncBodyState>, ESPMode::ThreadSafe> States;
+	{
+		FScopeLock Lock(&Impl->SnapshotMutex);
+		States = Impl->LatestBodyStates;
+	}
+	if (!States.IsValid()) return false;
+	if (const FBox3DAsyncBodyState* State = States->Find(Body.Id))
+	{
+		OutState = *State;
+		return true;
+	}
+	return false;
 }
 
 uint64 UBox3DAsyncSubsystem::GetCompletedStepCount() const

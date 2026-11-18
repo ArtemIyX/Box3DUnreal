@@ -25,6 +25,7 @@ public:
 	bool RegisterAuthoredPresentationActor(ABox3DAsyncPresentationActor* Actor);
 	void UnregisterAuthoredPresentationActor(ABox3DAsyncPresentationActor* Actor);
 	void RegisterSharedBody(FBox3DAsyncBodyHandle Body, ABox3DAsyncPresentationActor* Actor);
+	// TODO: Extend registration and Iris presentation to kinematic bodies and ragdoll groups.
 	void RegisterActorlessSharedBody(FBox3DAsyncBodyHandle Body, FGuid BodyKey,
 		const FSoftObjectPath& VisualAsset, const FVector& Scale, bool bDynamic);
 	void UnregisterSharedBody(FGuid BodyKey, FBox3DAsyncBodyId PhysicsBodyId);

@@ -74,3 +74,38 @@ bool FBox3DAsyncBlueprintAdapterTest::RunTest(const FString& Parameters)
 	return true;
 }
 #endif
+
+#include "Blueprint/Box3DAsyncBlueprint.h"
+#include "Misc/AutomationTest.h"
+
+#if WITH_DEV_AUTOMATION_TESTS
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FBox3DAsyncBlueprintUnavailableWorldTest,
+	"Box3DUnreal.Async.BlueprintUnavailableWorld", EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FBox3DAsyncBlueprintUnavailableWorldTest::RunTest(const FString& Parameters)
+{
+	FBox3DBPIdentity Body;
+	Body.World = FGuid::NewGuid(); Body.Id = 7;
+	FBox3DBPBodyCommand Command;
+	TestFalse(TEXT("Body command rejects unavailable world"), UBox3DBPAsyncLibrary::SubmitBodyCommand(nullptr, Body, Command));
+	FBox3DBPBodyState State;
+	State.Mass = 42.0f;
+	TestFalse(TEXT("Body state rejects unavailable world"), UBox3DBPAsyncLibrary::GetLatestBodyState(nullptr, Body, State));
+	TestEqual(TEXT("Failed state output is cleared"), State.Mass, 0.0f);
+	FBox3DBPFieldDesc FieldDesc;
+	FBox3DBPIdentity Field = Body;
+	TestFalse(TEXT("Field creation rejects unavailable world"), UBox3DBPAsyncLibrary::CreateField(nullptr, FieldDesc, Field));
+	TestEqual(TEXT("Failed field identity is cleared"), Field.Id, int64(0));
+	FBox3DBPJointDesc JointDesc;
+	FBox3DBPIdentity Joint = Body;
+	TestFalse(TEXT("Joint creation rejects unavailable world"), UBox3DBPAsyncLibrary::CreateJoint(nullptr, JointDesc, Joint));
+	TestEqual(TEXT("Failed joint identity is cleared"), Joint.Id, int64(0));
+	TArray<FBox3DBPJointBreakEvent> Events;
+	Events.AddDefaulted();
+	bool bGap = false;
+	UBox3DBPAsyncLibrary::DrainJointBreakEvents(nullptr, Events, bGap);
+	TestTrue(TEXT("Unavailable event stream reports a gap"), bGap);
+	TestTrue(TEXT("Unavailable event output is cleared"), Events.IsEmpty());
+	return true;
+}
+#endif
