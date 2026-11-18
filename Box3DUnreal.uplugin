@@ -1,49 +1,54 @@
 {
-	"FileVersion": 3,
-	"Version": 2,
-	"VersionName": "0.1.0",
-	"FriendlyName": "Box3D Unreal",
-	"Description": "Unreal Engine integration for Box3D, Erin Catto's 3D rigid body physics engine. Vendored box3d v0.1.0 compiled from source.",
-	"Category": "Physics",
-	"CreatedBy": "Artem Podorozhko",
-	"CreatedByURL": "https://github.com/ArtemIyX/",
-	"DocsURL": "https://box2d.org/posts/2026/06/announcing-box3d/",
-	"MarketplaceURL": "",
-	"SupportURL": "https://github.com/ArtemIyX/Box3DUnreal/issues",
-	"CanContainContent": false,
-	"IsBetaVersion": true,
-	"IsExperimentalVersion": false,
-	"Installed": false,
-	"Modules": [
-		{
-			"Name": "Box3DCore",
-			"Type": "Runtime",
-			"LoadingPhase": "PreDefault"
-		},
-		{
-			"Name": "Box3DRuntime",
-			"Type": "Runtime",
-			"LoadingPhase": "Default"
-		},
-		{
-			"Name": "Box3DTests",
-			"Type": "UncookedOnly",
-			"LoadingPhase": "Default"
-		},
-		{
-			"Name": "Box3DEditor",
-			"Type": "Editor",
-			"LoadingPhase": "Default"
-		}
-	],
-	"Plugins": [
-		{
-			"Name": "ProceduralMeshComponent", 
-			"Enabled": true
-		},
-		{
-			"Name": "Niagara",
-			"Enabled": true
-		}
-	]
+  "FileVersion": 3,
+  "Version": 2,
+  "VersionName": "0.1.0",
+  "FriendlyName": "Box3D Unreal",
+  "Description": "Unreal Engine integration for Box3D, Erin Catto's 3D rigid body physics engine. Vendored box3d v0.1.0 compiled from source.",
+  "Category": "Physics",
+  "CreatedBy": "Artem Podorozhko",
+  "CreatedByURL": "https://github.com/ArtemIyX/",
+  "DocsURL": "https://box2d.org/posts/2026/06/announcing-box3d/",
+  "MarketplaceURL": "",
+  "SupportURL": "https://github.com/ArtemIyX/Box3DUnreal/issues",
+  "CanContainContent": false,
+  "IsBetaVersion": true,
+  "IsExperimentalVersion": false,
+  "Installed": false,
+  "Modules": [
+    {
+      "Name": "Box3DCore",
+      "Type": "Runtime",
+      "LoadingPhase": "PreDefault"
+    },
+    {
+      "Name": "Box3DRuntime",
+      "Type": "Runtime",
+      "LoadingPhase": "Default"
+    },
+    {
+      "Name": "Box3DAsync",
+      "Type": "Runtime",
+      "LoadingPhase": "Default"
+    },
+    {
+      "Name": "Box3DTests",
+      "Type": "UncookedOnly",
+      "LoadingPhase": "Default"
+    },
+    {
+      "Name": "Box3DEditor",
+      "Type": "Editor",
+      "LoadingPhase": "Default"
+    }
+  ],
+  "Plugins": [
+    {
+      "Name": "ProceduralMeshComponent",
+      "Enabled": true
+    },
+    {
+      "Name": "Niagara",
+      "Enabled": true
+    }
+  ]
 }

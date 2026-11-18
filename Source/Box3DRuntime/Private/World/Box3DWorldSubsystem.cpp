@@ -48,6 +48,12 @@ DECLARE_DWORD_COUNTER_STAT(TEXT("Islands"), STAT_Box3DIslands, STATGROUP_Box3D);
 DECLARE_DWORD_COUNTER_STAT(TEXT("Solver tasks"), STAT_Box3DTasks, STATGROUP_Box3D);
 DECLARE_MEMORY_STAT(TEXT("World memory"), STAT_Box3DMemory, STATGROUP_Box3D);
 
+bool UBox3DWorldSubsystem::ShouldCreateSubsystem(UObject* Outer) const
+{
+	const UBox3DSettings* Settings = GetDefault<UBox3DSettings>();
+	return Super::ShouldCreateSubsystem(Outer) && Settings != nullptr && Settings->IsBackendEnabled(EBox3DBackend::Sync);
+}
+
 void UBox3DWorldSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 {
 	Super::Initialize(Collection);
