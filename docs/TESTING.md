@@ -1,9 +1,11 @@
 # Box3D Unreal — Testing
 
+The `Box3DTests` module is uncooked-only and is excluded from cooked targets.
+
 Two layers of verification. The current automation suite contains **110 tests**;
 43 are dedicated to fracture, destruction, structure, stress, and deformation.
 
-1. **Automation tests** (`Source/Box3DRuntime/Private/Tests/`) — deterministic,
+1. **Automation tests** (`Source/Box3DTests/Private/Tests/`) — deterministic,
    analytic assertions against synthetic game worlds. The authority on correctness.
 2. **Smoke commands** (`box3d.Smoke`, `box3d.SmokeActors`) — visual/integration
    checks in a real PIE session, plus the `box3d.AutoSmokeActors` headless hook.

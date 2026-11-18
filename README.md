@@ -1,153 +1,96 @@
-# Box3D Unreal
+<div align="center">
+  <h1>Box3D Unreal</h1>
+  <!-- Replace the placeholder below with <img src="docs/images/header.png" alt="Box3D shapes falling onto a platform in Unreal Engine"> when the banner is ready. -->
+  <p><em>Header image coming soon</em></p>
+  <p>Simulate rigid bodies, joints, and breakable objects in Unreal Engine with Erin Catto’s Box3D physics engine.</p>
+  <p>
+    <a href="#quick-start"><img src="https://img.shields.io/badge/Unreal_Engine-5.7-20252B?logo=unrealengine" alt="Unreal Engine 5.7"></a>
+    <a href="#quick-start"><img src="https://img.shields.io/badge/Setup-Windows-0067B8" alt="Windows setup"></a>
+    <a href="#quick-start"><img src="https://img.shields.io/badge/Project-C%2B%2B-00599C?logo=cplusplus" alt="C++ project"></a>
+    <a href="https://github.com/erincatto/box3d"><img src="https://img.shields.io/badge/Box3D-v0.1.0-2B7565" alt="Box3D v0.1.0"></a>
+    <a href="Box3DUnreal.uplugin"><img src="https://img.shields.io/badge/Plugin-beta-B55A14" alt="Plugin beta"></a>
+  </p>
+  <p>
+    <a href="#what-youll-try"><img src="https://img.shields.io/badge/Blueprint-queries-2457A6" alt="Blueprint queries"></a>
+    <a href="#run-your-first-simulation"><img src="https://img.shields.io/badge/Debug-drawing-5865A8" alt="Debug drawing"></a>
+    <a href="docs/DESTRUCTION.md"><img src="https://img.shields.io/badge/Physics-destruction-A13A42" alt="Physics destruction"></a>
+    <a href="LICENSE"><img src="https://img.shields.io/badge/Plugin_license-MIT-2E744C" alt="Plugin license MIT"></a>
+  </p>
+</div>
 
-Unreal Engine 5.7 plugin integrating [Box3D](https://github.com/erincatto/box3d) —
-Erin Catto's 3D rigid body physics engine (the 3D sibling of Box2D v3).
+## What you’ll try
 
-Box3D v0.1.0 is vendored under `Source/Box3DCore` and compiled from source by
-UnrealBuildTool; the plugin is fully standalone with no external build steps.
+Start by dropping a group of shapes onto a platform you can see in the editor. Each shape is a **rigid body**, an object that can move, rotate, and collide while keeping its shape.
 
-## Status
+- **Bodies and joints** let you build moving props and connect them with constraints such as hinges or springs.
+- **Blueprint queries** let you cast a ray or a shape through the Box3D world, or check which bodies overlap a volume.
+- **Destruction** lets you fracture a mesh into pieces and simulate how those pieces break apart. See the [destruction guide](docs/DESTRUCTION.md).
 
-**Beta / M6 and deterministic destruction complete.** The library compiles inside UE, a
-physics world is stepped per game world at a fixed timestep, `UBox3DBodyComponent`
-gives actors Box3D rigid bodies with transform sync in both directions — primitive
-shapes (box/sphere/capsule with auto-fit), cooked convex hulls, exact triangle
-meshes, and `CollisionAsset` (one shape per authored collision element), plus
-collision filtering and physical materials. `UBox3DQueryLibrary` exposes ray/shape
-casts, overlaps, explosions, and character-mover collide-and-slide helpers to
-Blueprint. Seven joint component types
-(distance/revolute/prismatic/spherical/weld/motor/wheel) with limits, motors,
-springs, and breakage, plus contact/hit/sensor events as Blueprint delegates.
-Multithreaded stepping rides UE's task system (or box3d's internal scheduler) —
-5.1× on a 16-core 5k-body pile, deterministic across worker counts — with
-`stat box3d`, `box3d.DebugDraw` wireframes, and `box3d.Benchmark` for tuning.
-Recording/replay with hash-based determinism validation (`box3d.RecordStart/Stop`,
-`box3d.ValidateReplay`), continuous collision for fast movers, and an optional
-`BOX3D_DOUBLE_PRECISION` large-world build. Landscape height fields are deferred.
+## Quick start
 
-Post-M6 world integration: a **static scene mirror** (settings-gated) that cooks
-every qualifying static mesh component — ISM/HISM instances included — into raw
-Box3D static bodies at level load and follows level streaming / World Partition,
-so dynamic bodies rest on existing maps with zero per-actor setup;
-`ABox3DPropActor` plus `Box3D::ConvertToProp` / `box3d.MakeProp` to turn any
-placed static mesh (or ISM instance) into a live physics prop whose mesh keeps
-Chaos query collision for unchanged gameplay traces; `AddImpulseAtLocation` /
-`AddForceAtLocation` on the body component; `UBox3DGrabComponent` (physics
-hands: mass-gated grab/carry/throw with a velocity-tracking grip — held bodies
-stay dynamic, sag when heavy, throw at impulse/mass — and it doubles as the
-winch for pull-the-light-thing-to-me grapples); and optional render
-interpolation between fixed steps (`bInterpolateBodyTransforms`) for
-high-refresh displays.
-Soft-body actors built from raw bodies behind purely visual skins:
-`ABox3DRopeActor` (capsule chain + spherical joints, rendered as spline meshes;
-pin the far end, `AttachActorToEnd`/`AttachBodyToEnd` at runtime, or snap it via
-`LinkBreakForce` / `CutLink`; winch support for grapples — `SetDeployedLength`
-spools links in and out, `GetEndConstraintForce` reads the end-joint tension,
-`BuildDirection` lays the chain toward its holder, and `bCollideWithPawns`
-keeps it off the character carrying it) and `ABox3DClothActor` (sphere-particle lattice + distance-joint
-stitching, rendered as a double-sided procedural mesh with per-frame normals,
-material hot-swappable) — both interpolate between fixed steps, preview their
-rest shape in the editor, and spawn at the crosshair via `box3d.SpawnRope` /
-`box3d.SpawnCloth`. Plus a special-actor zoo: `ABox3DBreakableActor` (child
-meshes become welded chunks that shatter past a break force —
-`box3d.SpawnBreakable`), `ABox3DConveyorActor` (box3d surface-material tangent
-velocity drags resting bodies), and `ABox3DWindActor` (per-fixed-step drag
-forces via the subsystem's `OnPreStep` hook; directional, turbulence,
-spline-following, or vortex fields — `box3d.SpawnWind`).
-Post-M6 ports from [Antonio Lattanzio's Box3DUnreal](https://github.com/alattanzio/Box3DUnreal)
-(MIT): **baked static collision** — a `Box3DBake` commandlet extracts exactly
-what the static mirror would cook into `BC_<MapName>` assets, so packaged
-builds instantiate static geometry without runtime cooking or CPU-accessible
-render data ([docs/BAKED_COLLISION.md](docs/BAKED_COLLISION.md)); **authority
-gating** (`bAuthorityOnlySimulation` — pure clients get no Box3D world); and
-**snapshot / prediction / rollback** primitives — per-body capture/restore/hash,
-a whole-world `FSnapshotRing`, and `ReconcileAndReplay` for client-side
-prediction against an authoritative server
-([docs/NETWORKING.md](docs/NETWORKING.md)).
+### 1. Install the requirements
 
-The destruction stack adds seeded, quantized Voronoi fracture; welded rendered
-fragments; energy-driven Body/Debris/Dust tiers and global budgets; anchored
-connectivity with stress-driven chain collapse; vertex dents, UV dent maps, and
-plastic girder hinges. Its transport-neutral multiplayer contract replicates
-`(MeshId, Impact, Seed, Params)`, validates layout hashes, regenerates visuals on
-no-physics clients, and exposes a server-correction seam
-([docs/DESTRUCTION.md](docs/DESTRUCTION.md)).
+- [Unreal Engine 5.7](https://www.unrealengine.com/download)
+- [Git for Windows](https://git-scm.com/download/win)
+- [Visual Studio 2022](https://learn.microsoft.com/en-us/visualstudio/gamedev/unreal/get-started/vs-tools-unreal-install) with the **Game development with C++** workload, including MSVC and a Windows SDK
+- An Unreal Engine 5.7 **C++ project**. To start from scratch, create a **Games → Blank** project and choose **C++** in the project settings before creating it.
 
-All of it is pinned by a deterministic automation suite — 110 tests
-(`Automation RunTests Box3DUnreal`, see [docs/TESTING.md](docs/TESTING.md)).
-See [docs/MILESTONES.md](docs/MILESTONES.md) for the roadmap,
-[docs/DESIGN.md](docs/DESIGN.md) for architecture decisions, and
-[UPSTREAM.md](UPSTREAM.md) for the box3d version-bump workflow.
+### 2. Clone the plugin into your project
 
-## Install
+Close Unreal Editor. Open PowerShell in the folder containing your project's `.uproject` file and run:
 
-Drop the `Box3DUnreal` folder into your project's `Plugins/` directory and rebuild.
-Requires UE 5.7, C++ project.
-
-## Tests
-
-110 automation tests cover conversion math, world stepping, body components, queries,
-mesh cooking, joints, gameplay events, threading, diagnostics, replay determinism,
-explosions, continuous collision, snapshot/rollback, deterministic fracture,
-destruction replication, structures, stress, and deformation with analytic assertions
-([docs/TESTING.md](docs/TESTING.md)):
-
-```
-Automation RunTests Box3DUnreal
+```powershell
+git clone https://github.com/ArtemIyX/Box3DUnreal.git Plugins/Box3DUnreal
 ```
 
-## Quick test
+Check that `Plugins/Box3DUnreal/Box3DUnreal.uplugin` now exists. The plugin includes the Box3D source, which Unreal Build Tool compiles with your project.
 
-Run in PIE, open the console (`` ` ``) and enter:
+### 3. Enable and build
 
-```
-box3d.Smoke
-```
+Open your `.uproject` file with Unreal Engine 5.7. If Unreal prompts you to rebuild missing modules, select **Yes**. In **Edit → Plugins**, search for **Box3D Unreal** and enable it if needed. Restart the editor when prompted.
 
-A stack of debug-drawn falling boxes and spheres simulated by Box3D appears in front
-of the camera. `box3d.Smoke 200` spawns 200 bodies.
+## Run your first simulation
 
-For the full component pipeline with rendered meshes (real actors whose root is a
-`UBox3DBodyComponent`):
+1. Open a basic level or choose **File → New Level → Basic**. In the editor viewport, position the camera about five meters above the floor and face an open area. Hold the right mouse button and use **E** to move up.
+2. In the dropdown next to **Play**, set **Spawn Player At** to **Current Camera Location**, then click **Play**. Press the console key (usually `~` on a US keyboard) to open the in-game console.
+3. Enter this command, then close the console and look slightly down in front of you.
 
-```
-box3d.SmokeActors
-```
+   ```text
+   box3d.SmokeActors 20
+   ```
 
-Either command with `0` clears its bodies.
+   Twenty cubes, spheres, and cylinders should fall onto a slab and settle. The command places its own slab three meters below your view. Starting above the level floor keeps the demo in sight.
 
-For destruction, start with `box3d.Fracture` or `box3d.FractureDebug`; the
-complete setup, multiplayer flow, budgets, structural demos, deformation commands,
-and troubleshooting guide is [docs/DESTRUCTION.md](docs/DESTRUCTION.md).
-
-Also useful: `box3d.DebugDraw 1` (wireframes of every physics shape, plus
-`box3d.DebugDraw.Contacts/Bounds/Mass/...`), `stat box3d` (step profile and world
-counters), `box3d.Benchmark` (scheduler comparison for sizing
-`WorkerCount`/`TaskSystem` in Project Settings), and `box3d.RecordStart` /
-`box3d.RecordStop` / `box3d.ValidateReplay <file>` (hash-validated record & replay).
-
-## Modules
-
-| Module | Purpose |
+| Console command | What it does |
 | --- | --- |
-| `Box3DCore` | Vendored box3d v0.1.0 (C17, unmodified upstream source — see [UPSTREAM.md](UPSTREAM.md)) |
-| `Box3DRuntime` | UE integration: world subsystem, unit conversion, settings, hooks |
-| `Box3DEditor` | Editor tooling: `Box3DBake` commandlet for baked static collision |
+| `box3d.DebugDraw 1` | Shows wireframes for the Box3D collision shapes. Use `box3d.DebugDraw 0` to hide them. |
+| `box3d.SmokeActors 0` | Removes the smoke-test actors and their slab. |
 
-## Conventions
+## Explore further
 
-- Units: box3d works in meters; conversion is a flat ×0.01/×100 at the boundary
-- Axes: UE's Z-up coordinates are passed straight through (box3d has no up-axis convention)
-- One `b3WorldId` per `UWorld`, owned by `UBox3DWorldSubsystem`
+| Module | Where to look |
+| --- | --- |
+| [Box3DCore](Source/Box3DCore/) | The bundled Box3D engine. |
+| [Box3DRuntime](Source/Box3DRuntime/) | Unreal-facing bodies, joints, queries, and simulation settings. |
+| [Box3DEditor](Source/Box3DEditor/) | Tools for baking level collision ahead of time. |
+| [Box3DTests](Source/Box3DTests/) | Unreal automation tests for the integration. |
 
-## Contributing
+- **Run the tests.** Enter `Automation RunTests Box3DUnreal` in Unreal's console. See the [testing guide](docs/TESTING.md).
+- **Prepare level collision for packaged builds.** See the [baked collision guide](docs/BAKED_COLLISION.md).
+- **Try fracture, debris, and deformation.** See the [destruction guide](docs/DESTRUCTION.md).
+- **Explore snapshots, prediction, and rollback.** See the [networking guide](docs/NETWORKING.md).
+- **See how the integration works or contribute.** Read the [design notes](docs/DESIGN.md) and the [contributing guide](CONTRIBUTING.md).
 
-Open source under MIT — bug reports, suggestions, and pull requests are
-welcome; see [CONTRIBUTING.md](CONTRIBUTING.md).
+## Troubleshooting
 
-## Licenses & credits
+| If you see this | Try this |
+| --- | --- |
+| The plugin folder is empty or the plugin is missing from the list. | Confirm the `.uplugin` file is directly under `Plugins/Box3DUnreal/`. If your project includes the plugin as a Git submodule, run `git submodule update --init --recursive` from the project root. |
+| Unreal can't build the modules. | Check that your project opens with UE 5.7 and that the Visual Studio C++ workload, MSVC, and Windows SDK are installed. Close Unreal, right-click the `.uproject`, choose **Generate Visual Studio project files**, and build the **Development Editor** target for **Win64** in Visual Studio. |
+| The console doesn't recognize `box3d.SmokeActors`. | Check that **Box3D Unreal** is enabled, restart the editor, and retry from the in-game console after clicking **Play**. |
 
-- This plugin: MIT ([LICENSE](LICENSE))
-- Box3D: MIT, © Erin Catto ([Source/Box3DCore/box3d.LICENSE](Source/Box3DCore/box3d.LICENSE))
-- Baked collision and snapshot/rollback concepts ported from
-  [Box3DUnreal](https://github.com/alattanzio/Box3DUnreal) by Antonio Lattanzio (MIT)
+## License and credits
+
+- Box3D Unreal is available under the [MIT license](LICENSE).
+- The bundled [Box3D](https://github.com/erincatto/box3d) engine is by Erin Catto and carries its own [MIT license](Source/Box3DCore/box3d.LICENSE).
+- Baked collision and snapshot/rollback work builds on [Antonio Lattanzio’s Box3DUnreal](https://github.com/alattanzio/Box3DUnreal).
