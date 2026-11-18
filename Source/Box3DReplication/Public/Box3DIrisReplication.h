@@ -86,7 +86,15 @@ namespace Box3DIrisReplication
 		double ResidentDistance, uint64 ResidentId);
 	BOX3DREPLICATION_API FStageBudget ComputeStageBudget(int32 LifecycleCount, int32 RoutineCount,
 		int32 TotalBudget, int32 MaxLifecycleBudget);
+	struct FDistanceTier
+	{
+		double MaxDistance = 0.0;
+		double Interval = 0.0;
+	};
+	BOX3DREPLICATION_API TArray<FDistanceTier> GetDistanceTiers();
 	BOX3DREPLICATION_API double ComputeTierInterval(double Distance, double PreviousInterval = 0.0);
+	BOX3DREPLICATION_API double ComputeTierInterval(double Distance, double PreviousInterval,
+		const TArray<FDistanceTier>& Tiers, double Hysteresis);
 	BOX3DREPLICATION_API bool IsDeadlineDue(double Now, double Deadline);
 	BOX3DREPLICATION_API double AdvanceDeadline(double Now, double Interval, double Deadline);
 	BOX3DREPLICATION_API bool IsCaptureSequenceNewer(uint32 NewSequence, uint32 PreviousSequence);

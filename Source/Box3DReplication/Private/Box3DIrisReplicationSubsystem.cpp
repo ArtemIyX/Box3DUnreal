@@ -1,6 +1,7 @@
 #include "Box3DIrisReplicationSubsystem.h"
 
 #include "Box3DAsyncPresentationActor.h"
+#include "Box3DReplicationSettings.h"
 #include "Engine/AssetManager.h"
 #include "Engine/NetConnection.h"
 #include "Engine/NetDriver.h"
@@ -23,10 +24,6 @@
 
 namespace
 {
-	constexpr double NearTierDistance = 1500.0;
-	constexpr double MidTierDistance = 4000.0;
-	constexpr double CullDistance = 10000.0;
-	constexpr double CullHysteresis = 250.0;
 	constexpr int32 MaxStagedItemsPerConnectionPerPass = 128;
 	constexpr int32 MaxCandidatesPerConnectionPerPass = 512;
 	constexpr int32 MaxResidentRowsPerConnection = 512;
@@ -511,6 +508,12 @@ void UBox3DIrisReplicationSubsystem::StageAuthorityForConnections()
 	RemoveDisconnectedConnections();
 	UNetDriver* Driver = World ? World->GetNetDriver() : nullptr;
 	if (World == nullptr || Driver == nullptr || World->GetNetMode() == NM_Client || !CheckAuthorityWorldOrigin()) return;
+	const UBox3DReplicationSettings* Settings = GetDefault<UBox3DReplicationSettings>();
+	const TArray<Box3DIrisReplication::FDistanceTier> Tiers = Box3DIrisReplication::GetDistanceTiers();
+	const double CullDistance = Tiers.Last().MaxDistance;
+	const double CullHysteresis = FMath::IsFinite(Settings->CullHysteresis) ? FMath::Max(0.0, double(Settings->CullHysteresis)) : 0.0;
+	const double NearTierDistance = Tiers[0].MaxDistance;
+	const double MidTierDistance = Tiers[FMath::Min(1, Tiers.Num() - 1)].MaxDistance;
 	for (UNetConnection* Connection : Driver->ClientConnections)
 	{
 		if (!IsValid(Connection)) continue;
@@ -593,7 +596,7 @@ void UBox3DIrisReplicationSubsystem::StageAuthorityForConnections()
 				continue;
 			}
 			const double PreviousInterval = State->Intervals.FindRef(NetworkBodyId);
-			const double Interval = Box3DIrisReplication::ComputeTierInterval(Distance, PreviousInterval);
+			const double Interval = Box3DIrisReplication::ComputeTierInterval(Distance, PreviousInterval, Tiers, Settings->TierHysteresis);
 			double& NextDeadline = State->NextDeadlines.FindOrAdd(NetworkBodyId, Now);
 			if (PreviousInterval <= 0.0 || Interval < PreviousInterval) NextDeadline = Now;
 			State->Intervals.Add(NetworkBodyId, Interval);
@@ -633,7 +636,7 @@ void UBox3DIrisReplicationSubsystem::StageAuthorityForConnections()
 			double Distance = TNumericLimits<double>::Max();
 			for (const FVector& View : Views) Distance = FMath::Min(Distance, FVector::Distance(View, AbsolutePosition));
 			if (Distance > CullDistance) continue;
-			const double Interval = Box3DIrisReplication::ComputeTierInterval(Distance);
+			const double Interval = Box3DIrisReplication::ComputeTierInterval(Distance, 0.0, Tiers, Settings->TierHysteresis);
 			AdmissionCandidates.Add({NetworkBodyId, Distance, Interval, Now + Interval, true});
 		}
 		if (!AdmissionCandidates.IsEmpty())

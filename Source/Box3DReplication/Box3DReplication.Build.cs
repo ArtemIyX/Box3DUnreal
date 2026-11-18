@@ -6,6 +6,7 @@ public class Box3DReplication : ModuleRules
     {
         PCHUsage = PCHUsageMode.UseExplicitOrSharedPCHs;
         PublicDependencyModuleNames.AddRange(new string[] { "Core", "CoreUObject", "Engine", "Box3DAsync", "NetCore", "IrisCore" });
+        PublicDependencyModuleNames.Add("DeveloperSettings");
         SetupIrisSupport(Target);
     }
 }

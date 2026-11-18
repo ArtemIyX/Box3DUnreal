@@ -106,11 +106,18 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FBox3DIrisSchedulerAndPresentationInvariantTest
 
 bool FBox3DIrisSchedulerAndPresentationInvariantTest::RunTest(const FString& Parameters)
 {
-	TestEqual(TEXT("Near tier schedules at 20 Hz"), Box3DIrisReplication::ComputeTierInterval(1000.0), 0.05);
-	TestEqual(TEXT("Near tier hysteresis retains 20 Hz at threshold plus margin"),
-		Box3DIrisReplication::ComputeTierInterval(1550.0, 0.05), 0.05);
-	TestEqual(TEXT("Mid tier schedules at 10 Hz"), Box3DIrisReplication::ComputeTierInterval(2500.0), 0.1);
-	TestEqual(TEXT("Far tier schedules at 5 Hz"), Box3DIrisReplication::ComputeTierInterval(5000.0), 0.2);
+	TestEqual(TEXT("First tier schedules at 60 Hz"), Box3DIrisReplication::ComputeTierInterval(1000.0), 1.0 / 60.0);
+	TestEqual(TEXT("Hysteresis retains the first tier"),
+		Box3DIrisReplication::ComputeTierInterval(1550.0, 1.0 / 60.0), 1.0 / 60.0);
+	TestEqual(TEXT("Second tier schedules at 45 Hz"), Box3DIrisReplication::ComputeTierInterval(2000.0), 1.0 / 45.0);
+	TestEqual(TEXT("Third tier schedules at 30 Hz"), Box3DIrisReplication::ComputeTierInterval(3000.0), 1.0 / 30.0);
+	TestEqual(TEXT("Fourth tier schedules at 15 Hz"), Box3DIrisReplication::ComputeTierInterval(5000.0), 1.0 / 15.0);
+	TestEqual(TEXT("Fifth tier schedules at 5 Hz"), Box3DIrisReplication::ComputeTierInterval(9000.0), 1.0 / 5.0);
+	const TArray<Box3DIrisReplication::FDistanceTier> CustomTiers = {{500.0, 0.025}, {2000.0, 0.125}, {8000.0, 0.5}, {12000.0, 1.0}};
+	TestEqual(TEXT("Custom near rate"), Box3DIrisReplication::ComputeTierInterval(400.0, 0.0, CustomTiers, 50.0), 0.025);
+	TestEqual(TEXT("Custom extra tier"), Box3DIrisReplication::ComputeTierInterval(9000.0, 0.0, CustomTiers, 50.0), 1.0);
+	TestEqual(TEXT("Custom hysteresis retains prior tier"), Box3DIrisReplication::ComputeTierInterval(520.0, 0.025, CustomTiers, 50.0), 0.025);
+	TestEqual(TEXT("Custom hysteresis eventually changes tier"), Box3DIrisReplication::ComputeTierInterval(551.0, 0.025, CustomTiers, 50.0), 0.125);
 	TestTrue(TEXT("Deadline is not due early"), !Box3DIrisReplication::IsDeadlineDue(1.99, 2.0));
 	TestTrue(TEXT("Deadline becomes due at boundary"), Box3DIrisReplication::IsDeadlineDue(2.0, 2.0));
 	TestTrue(TEXT("Late scheduling advances deadline past now"), FMath::IsNearlyEqual(

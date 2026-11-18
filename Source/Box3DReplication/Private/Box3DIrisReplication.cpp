@@ -1,5 +1,6 @@
 #include "Box3DIrisReplication.h"
 #include "Box3DIrisReplicationSubsystem.h"
+#include "Box3DReplicationSettings.h"
 
 #include "Engine/NetDriver.h"
 #include "Engine/World.h"
@@ -99,21 +100,41 @@ Box3DIrisReplication::FStageBudget Box3DIrisReplication::ComputeStageBudget(int3
 	return Result;
 }
 
+TArray<Box3DIrisReplication::FDistanceTier> Box3DIrisReplication::GetDistanceTiers()
+{
+	TArray<FDistanceTier> Tiers;
+	for (const TPair<float, float>& Pair : GetDefault<UBox3DReplicationSettings>()->DistanceRatesHz)
+	{
+		if (FMath::IsFinite(Pair.Key) && Pair.Key > 0.0f && FMath::IsFinite(Pair.Value) && Pair.Value > 0.0f)
+			Tiers.Add({double(Pair.Key), 1.0 / double(Pair.Value)});
+	}
+	Tiers.Sort([](const FDistanceTier& A, const FDistanceTier& B) { return A.MaxDistance < B.MaxDistance; });
+	if (Tiers.IsEmpty()) Tiers = {{1500.0, 1.0 / 60.0}, {2500.0, 1.0 / 45.0},
+		{4000.0, 1.0 / 30.0}, {7000.0, 1.0 / 15.0}, {10000.0, 1.0 / 5.0}};
+	return Tiers;
+}
+
 double Box3DIrisReplication::ComputeTierInterval(double Distance, double PreviousInterval)
 {
-	constexpr double NearDistance = 1500.0;
-	constexpr double MidDistance = 4000.0;
-	constexpr double NearInterval = 1.0 / 20.0;
-	constexpr double MidInterval = 1.0 / 10.0;
-	constexpr double FarInterval = 1.0 / 5.0;
-	constexpr double Hysteresis = 100.0;
-	if (PreviousInterval == NearInterval && Distance <= NearDistance + Hysteresis) return NearInterval;
-	if (PreviousInterval == MidInterval && Distance > NearDistance - Hysteresis
-		&& Distance <= MidDistance + Hysteresis) return MidInterval;
-	if (PreviousInterval == FarInterval && Distance > MidDistance - Hysteresis) return FarInterval;
-	if (Distance <= NearDistance) return NearInterval;
-	if (Distance <= MidDistance) return MidInterval;
-	return FarInterval;
+	const UBox3DReplicationSettings* Settings = GetDefault<UBox3DReplicationSettings>();
+	return ComputeTierInterval(Distance, PreviousInterval, GetDistanceTiers(), Settings->TierHysteresis);
+}
+
+double Box3DIrisReplication::ComputeTierInterval(double Distance, double PreviousInterval,
+	const TArray<FDistanceTier>& Tiers, double Hysteresis)
+{
+	if (Tiers.IsEmpty()) return 1.0 / 5.0;
+	Hysteresis = FMath::IsFinite(Hysteresis) ? FMath::Max(0.0, Hysteresis) : 0.0;
+	for (int32 Index = 0; Index < Tiers.Num(); ++Index)
+	{
+		const double Lower = Index == 0 ? 0.0 : Tiers[Index - 1].MaxDistance;
+		const double Upper = Tiers[Index].MaxDistance;
+		if (PreviousInterval == Tiers[Index].Interval && (Index == 0 || Distance > Lower - Hysteresis)
+			&& (Index == Tiers.Num() - 1 || Distance <= Upper + Hysteresis)) return Tiers[Index].Interval;
+	}
+	for (const FDistanceTier& Tier : Tiers)
+		if (Distance <= Tier.MaxDistance) return Tier.Interval;
+	return Tiers.Last().Interval;
 }
 
 bool Box3DIrisReplication::IsDeadlineDue(double Now, double Deadline)
