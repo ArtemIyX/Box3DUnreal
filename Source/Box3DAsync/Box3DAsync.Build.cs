@@ -10,16 +10,16 @@ public class Box3DAsync : ModuleRules
             new string[]
             {
                 "Core",
+                "CoreUObject",
+                "Engine",
             }
         );
 
         PrivateDependencyModuleNames.AddRange(
             new string[]
             {
-                "CoreUObject",
-                "Engine",
-                "Slate",
-                "SlateCore"
+                "Box3DCore",
+                "Box3DRuntime",
             }
         );
     }

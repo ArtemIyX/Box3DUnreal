@@ -26,6 +26,11 @@
       "LoadingPhase": "Default"
     },
     {
+      "Name": "Box3DAsync",
+      "Type": "Runtime",
+      "LoadingPhase": "Default"
+    },
+    {
       "Name": "Box3DTests",
       "Type": "UncookedOnly",
       "LoadingPhase": "Default"
