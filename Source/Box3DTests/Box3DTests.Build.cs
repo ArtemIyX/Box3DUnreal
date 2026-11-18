@@ -13,10 +13,12 @@ public class Box3DTests : ModuleRules
 			"CoreUObject",
 			"Engine",
 			"Box3DCore",
+			"Box3DAsync",
 			"Box3DRuntime",
 			"PhysicsCore",
 			"ProceduralMeshComponent",
 		});
 		PrivateIncludePaths.Add(Path.Combine(ModuleDirectory, "../Box3DRuntime/Private"));
+		PrivateIncludePaths.Add(Path.Combine(ModuleDirectory, "../Box3DAsync/Private"));
 	}
 }

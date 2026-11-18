@@ -20,6 +20,7 @@ public class Box3DAsync : ModuleRules
             {
                 "Box3DCore",
                 "Box3DRuntime",
+                "PhysicsCore",
             }
         );
     }

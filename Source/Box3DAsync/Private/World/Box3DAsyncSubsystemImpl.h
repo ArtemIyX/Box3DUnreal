@@ -6,19 +6,50 @@
 #include "HAL/Runnable.h"
 #include "HAL/RunnableThread.h"
 #include "Misc/ScopeLock.h"
+#include "PhysicsEngine/BodySetup.h"
 #include "box3d/box3d.h"
+
+namespace Box3DAsyncPrivate
+{
+#if WITH_DEV_AUTOMATION_TESTS
+	BOX3DASYNC_API bool ValidateAndCopyGeometryForTest(const TArray<FVector>& Vertices, const TArray<int32>& Indices,
+		EBox3DAsyncMeshWinding Winding, TArray<b3Vec3>& OutVertices, TArray<int32>& OutIndices,
+		uint64& OutByteCount, FVector& OutBoundsMin, FVector& OutBoundsMax);
+	BOX3DASYNC_API bool IsCompleteMeshCookForTest(const b3MeshData* MeshData, int32 ExpectedTriangleCount);
+#endif
+
+	enum class EStaticShapeType : uint8 { Sphere, Capsule, Hull };
+
+	struct FCopiedStaticShape
+	{
+		EStaticShapeType Type = EStaticShapeType::Hull;
+		b3Sphere Sphere{};
+		b3Capsule Capsule{};
+		TArray<b3Vec3> HullPoints;
+	};
+
+	BOX3DASYNC_API bool IsSupportedAuthoredCollisionScale(bool bHasRoundShapes, const FVector& Scale);
+	BOX3DASYNC_API bool CopyAuthoredCollisionShapes(const UBodySetup& BodySetup, const FVector& Scale,
+		TArray<FCopiedStaticShape>& OutShapes, FVector& OutBoundsMin, FVector& OutBoundsMax, uint64& OutPayloadBytes);
+}
 
 struct UBox3DAsyncSubsystem::FImpl
 {
-	enum class ECommandType : uint8 { CreateBox, CreateSphere, Remove };
+	enum class ECommandType : uint8 { CreateBox, CreateSphere, RegisterGeometry, CreateMeshInstance, CreateAuthoredStaticBody, ReleaseGeometry, Remove };
 
 	struct FCommand
 	{
 		ECommandType Type = ECommandType::Remove;
 		FBox3DAsyncBodyId BodyId = 0;
+		FBox3DAsyncGeometryId GeometryId = 0;
 		FTransform Transform = FTransform::Identity;
 		FVector Dimensions = FVector::ZeroVector;
 		FVector InitialVelocity = FVector::ZeroVector;
+		FVector Scale = FVector::OneVector;
+		uint64 PayloadBytes = 0;
+		TArray<b3Vec3> Vertices;
+		TArray<int32> Indices;
+		TArray<Box3DAsyncPrivate::FCopiedStaticShape> StaticShapes;
 	};
 
 	struct FTraceRequest
@@ -38,12 +69,22 @@ struct UBox3DAsyncSubsystem::FImpl
 	{
 		FBody() = default;
 
-		FBody(b3BodyId InNativeId, bool bInDynamic) : NativeId(InNativeId), bDynamic(bInDynamic)
+		FBody(b3BodyId InNativeId, bool bInDynamic, FBox3DAsyncGeometryId InGeometryId = 0)
+			: NativeId(InNativeId), bDynamic(bInDynamic), GeometryId(InGeometryId)
 		{
 		}
 
 		b3BodyId NativeId{};
 		bool bDynamic = false;
+		FBox3DAsyncGeometryId GeometryId = 0;
+	};
+
+	struct FGeometry
+	{
+		b3MeshData* NativeData = nullptr;
+		int32 InstanceCount = 0;
+		int32 DegenerateTriangleCount = 0;
+		bool bReleasePending = false;
 	};
 
 	class FWorker final : public FRunnable
@@ -84,16 +125,42 @@ struct UBox3DAsyncSubsystem::FImpl
 	TArray<FCommand> Commands;
 	TArray<FTraceRequest> TraceRequests;
 	TArray<FBox3DAsyncTraceResult> TraceResults;
+	TArray<FBox3DAsyncCreationResult> CreationResults;
 	int32 InFlightTraces = 0;
 	TSet<FBox3DAsyncBodyId> AcceptedBodyIds;
+	TSet<FBox3DAsyncGeometryId> AcceptedGeometryIds;
+	TMap<FBox3DAsyncGeometryId, uint64> GeometryByteReservations;
+	struct FGeometryBounds
+	{
+		FVector Min = FVector::ZeroVector;
+		FVector Max = FVector::ZeroVector;
+	};
+	TMap<FBox3DAsyncGeometryId, FGeometryBounds> AcceptedGeometryBounds;
+	uint64 ReservedGeometryBytes = 0;
+	uint64 ReservedStaticShapeBytes = 0;
+	int32 OutstandingCreationResults = 0;
 	FBox3DAsyncBodyId NextBodyId = 1;
 	FBox3DAsyncTraceRequestId NextRequestId = 1;
+	FBox3DAsyncGeometryId NextGeometryId = 1;
 	TArray<TSharedPtr<const FSnapshot, ESPMode::ThreadSafe>> Snapshots;
 	TMap<FBox3DAsyncBodyId, FBody> WorkerBodies;
+	TMap<FBox3DAsyncGeometryId, FGeometry> WorkerGeometries;
 	FEvent* WakeEvent = nullptr;
 	TUniquePtr<FWorker> Worker;
 	FRunnableThread* Thread = nullptr;
 	bool bAccepting = false;
+
+	void PublishCreationResult(EBox3DAsyncCreationKind Kind, uint64 ResourceId, bool bSucceeded,
+	                           int32 DegenerateCount = 0, int32 DroppedTriangleCount = 0)
+	{
+		FScopeLock Lock(&QueueMutex);
+		FBox3DAsyncCreationResult& Result = CreationResults.AddDefaulted_GetRef();
+		Result.Kind = Kind;
+		Result.ResourceId = ResourceId;
+		Result.bSucceeded = bSucceeded;
+		Result.DegenerateTriangleCount = DegenerateCount;
+		Result.DroppedTriangleCount = DroppedTriangleCount;
+	}
 
 	void Shutdown()
 	{
