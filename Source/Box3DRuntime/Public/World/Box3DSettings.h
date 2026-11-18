@@ -4,6 +4,7 @@
 #include "Engine/DeveloperSettings.h"
 #include "Data/Enums/Box3DTaskSystem.h"
 #include "Data/Enums/Box3DMirrorGeometry.h"
+#include "Data/Enums/Box3DBackend.h"
 #include "Box3DSettings.generated.h"
 
 
@@ -23,6 +24,15 @@ public:
 	UBox3DSettings();
 
 	virtual FName GetCategoryName() const override { return TEXT("Plugins"); }
+
+	/** Backends to create for new Game and PIE worlds. Changes apply when the world is restarted. */
+	UPROPERTY(EditAnywhere, config, Category = "Backends", meta = (Bitmask, BitmaskEnum = "/Script/Box3DRuntime.EBox3DBackend"))
+	int32 EnabledBackends = static_cast<int32>(EBox3DBackend::Sync) | static_cast<int32>(EBox3DBackend::Async);
+
+	bool IsBackendEnabled(EBox3DBackend Backend) const
+	{
+		return (EnabledBackends & static_cast<int32>(Backend)) != 0;
+	}
 
 	/// Fixed simulation timestep in seconds. Box3D is designed for fixed stepping;
 	/// the subsystem accumulates frame time and steps at this rate.

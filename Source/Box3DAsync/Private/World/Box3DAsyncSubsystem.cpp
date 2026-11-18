@@ -361,8 +361,8 @@ bool UBox3DAsyncSubsystem::ShouldCreateSubsystem(UObject* Outer) const
 		return false;
 	}
 	const UBox3DSettings* Settings = GetDefault<UBox3DSettings>();
-	// TODO(OUT-OF-SCOPE): Select this backend through shared SimulationBackend settings once the runtime settings and legacy gate are updated [box3d-async-milestone-1].
-	return Settings == nullptr || !Settings->bAuthorityOnlySimulation || World->GetNetMode() != NM_Client;
+	return Settings != nullptr && Settings->IsBackendEnabled(EBox3DBackend::Async)
+		&& (!Settings->bAuthorityOnlySimulation || World->GetNetMode() != NM_Client);
 }
 
 void UBox3DAsyncSubsystem::Initialize(FSubsystemCollectionBase& Collection)
