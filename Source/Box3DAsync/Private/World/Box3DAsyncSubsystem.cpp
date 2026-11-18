@@ -5,6 +5,7 @@
 #include "Engine/StaticMesh.h"
 #include "PhysicsEngine/BodySetup.h"
 #include "HAL/PlatformTime.h"
+#include "Misc/ScopeExit.h"
 #include "Simulation/Box3DConversion.h"
 #include "StaticMeshResources.h"
 #include "World/Box3DSettings.h"
@@ -389,6 +390,7 @@ void UBox3DAsyncSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 	WorldDef.enableSleep = Settings->bEnableSleep;
 	WorldDef.enableContinuous = Settings->bEnableContinuous;
 	WorldDef.workerCount = 1;
+	WorldDef.hitEventThreshold = Settings->HitEventThreshold * Box3D::UEToMeters;
 	Impl->WorldId = b3CreateWorld(&WorldDef);
 	if (!b3World_IsValid(Impl->WorldId))
 	{
@@ -423,21 +425,93 @@ void UBox3DAsyncSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 void UBox3DAsyncSubsystem::Deinitialize()
 {
 	check(IsInGameThread());
+	if (Impl.IsValid() && Impl->bClosingQueries) return;
 	if (Impl.IsValid())
 	{
+		Impl->bClosingQueries = true;
 		Impl->Shutdown();
+		// The worker has joined. Committed outcomes survive; all other accepted
+		// requests select WorldEnded, including work completed after admission closed.
+		{
+			FScopeLock Lock(&Impl->QueueMutex);
+			for (auto& Pair : Impl->Queries)
+			{
+				FImpl::FQueryRecord& Record = Pair.Value;
+				if (!Record.bCommitted)
+				{
+					Record.Result.Status = EBox3DAsyncQueryStatus::WorldEnded;
+					Record.Result.Hits.Reset();
+					Record.bReady = true;
+					Record.bCommitted = true;
+				}
+			}
+		}
+		DispatchQueryCallbacks(true);
+		CloseEventSubscriptions();
+		TArray<uint64> Consumers;
+		Impl->ShutdownCallbacks.GetKeys(Consumers);
+		Consumers.Sort();
+		for (uint64 ConsumerId : Consumers)
+		{
+			FImpl::FShutdownCallback* Entry = Impl->ShutdownCallbacks.Find(ConsumerId);
+			if (!Entry || !Entry->Owner.IsValid() || !Entry->Callback || !Impl->QueryConsumers.Contains(ConsumerId)) continue;
+			TFunction<void()> Callback = MoveTemp(Entry->Callback);
+			Impl->ShutdownCallbacks.Remove(ConsumerId);
+			Callback();
+		}
 	}
 	Impl.Reset();
 	Super::Deinitialize();
 }
 
+void UBox3DAsyncSubsystem::Tick(float DeltaTime)
+{
+	check(IsInGameThread());
+	if (Impl.IsValid() && !Impl->bClosingQueries)
+	{
+		PumpQueryCallbacks();
+		PumpEventSubscriptions();
+	}
+}
+
+TStatId UBox3DAsyncSubsystem::GetStatId() const
+{
+	RETURN_QUICK_DECLARE_CYCLE_STAT(UBox3DAsyncSubsystem, STATGROUP_Tickables);
+}
+
 bool UBox3DAsyncSubsystem::TryCreateStaticBox(const FTransform& Transform, const FVector& HalfExtents,
                                               FBox3DAsyncBodyId& OutBodyId)
+{
+	FBox3DAsyncShapeOptions Options;
+	Options.CategoryBits = 1;
+	Options.MaskBits = 3;
+	Options.Density = b3DefaultShapeDef().density;
+	return TryCreateSimpleBox(Transform, HalfExtents, Options, false, OutBodyId);
+}
+
+bool UBox3DAsyncSubsystem::TryCreateStaticBox(const FTransform& Transform, const FVector& HalfExtents,
+                                              const FBox3DAsyncShapeOptions& Options, FBox3DAsyncBodyId& OutBodyId)
+{
+	return TryCreateSimpleBox(Transform, HalfExtents, Options, true, OutBodyId);
+}
+
+bool UBox3DAsyncSubsystem::TryCreateStaticBox(const FTransform& Transform, const FVector& HalfExtents,
+	const FBox3DAsyncShapeOptions& Options, FBox3DAsyncBodyHandle& OutBody)
+{
+	OutBody = {};
+	FBox3DAsyncBodyId Id = 0;
+	if (!TryCreateSimpleBox(Transform, HalfExtents, Options, true, Id)) return false;
+	OutBody = {Impl->QueryWorld, Id};
+	return true;
+}
+
+bool UBox3DAsyncSubsystem::TryCreateSimpleBox(const FTransform& Transform, const FVector& HalfExtents,
+	const FBox3DAsyncShapeOptions& Options, bool bRequireIdentity, FBox3DAsyncBodyId& OutBodyId)
 {
 	check(IsInGameThread());
 	OutBodyId = 0;
 	const b3Vec3 NativeHalfExtents = Box3D::ToB3(HalfExtents);
-	if (!Impl.IsValid() || !IsValidTransform(Transform) || !IsFiniteVector(HalfExtents)
+	if (!Impl.IsValid() || !FMath::IsFinite(Options.Density) || Options.Density < 0.0f || !IsValidTransform(Transform) || !IsFiniteVector(HalfExtents)
 		|| HalfExtents.X <= 0.0 || HalfExtents.Y <= 0.0 || HalfExtents.Z <= 0.0
 		|| !IsFiniteNativeVector(NativeHalfExtents) || NativeHalfExtents.x <= 0.0f || NativeHalfExtents.y <= 0.0f ||
 		NativeHalfExtents.z <= 0.0f)
@@ -449,12 +523,17 @@ bool UBox3DAsyncSubsystem::TryCreateStaticBox(const FTransform& Transform, const
 	{
 		return false;
 	}
-	if (Impl->OutstandingCreationResults >= OutstandingCreationResultCapacity)
+	if (Impl->OutstandingCreationResults >= OutstandingCreationResultCapacity
+		|| (bRequireIdentity && Impl->LiveShapeIdentities + Impl->ReservedShapeIdentities >= 8192))
 	{
 		return false;
 	}
 	FImpl::FCommand& Command = Impl->Commands.AddDefaulted_GetRef();
 	Command.Type = FImpl::ECommandType::CreateBox;
+	Command.ShapeOptions = Options;
+	Command.bHasShapeOptions = true;
+	Command.ReservedShapeIdentities = bRequireIdentity ? 1 : 0;
+	Impl->ReservedShapeIdentities += Command.ReservedShapeIdentities;
 	Command.BodyId = Impl->NextBodyId++;
 	Command.Transform = Transform;
 	Command.Dimensions = HalfExtents;
@@ -468,11 +547,40 @@ bool UBox3DAsyncSubsystem::TryCreateStaticBox(const FTransform& Transform, const
 bool UBox3DAsyncSubsystem::TryCreateDynamicSphere(const FTransform& Transform, float Radius,
                                                   const FVector& InitialVelocity, FBox3DAsyncBodyId& OutBodyId)
 {
+	FBox3DAsyncShapeOptions Options;
+	Options.CategoryBits = 2;
+	Options.MaskBits = 3;
+	// Preserve Box3D's configured default density for the legacy creation API.
+	Options.Density = b3DefaultShapeDef().density;
+	return TryCreateSimpleSphere(Transform, Radius, InitialVelocity, Options, false, OutBodyId);
+}
+
+bool UBox3DAsyncSubsystem::TryCreateDynamicSphere(const FTransform& Transform, float Radius,
+                                                  const FVector& InitialVelocity, const FBox3DAsyncShapeOptions& Options,
+                                                  FBox3DAsyncBodyId& OutBodyId)
+{
+	return TryCreateSimpleSphere(Transform, Radius, InitialVelocity, Options, true, OutBodyId);
+}
+
+bool UBox3DAsyncSubsystem::TryCreateDynamicSphere(const FTransform& Transform, float Radius,
+	const FVector& InitialVelocity, const FBox3DAsyncShapeOptions& Options, FBox3DAsyncBodyHandle& OutBody)
+{
+	OutBody = {};
+	FBox3DAsyncBodyId Id = 0;
+	if (!TryCreateSimpleSphere(Transform, Radius, InitialVelocity, Options, true, Id)) return false;
+	OutBody = {Impl->QueryWorld, Id};
+	return true;
+}
+
+bool UBox3DAsyncSubsystem::TryCreateSimpleSphere(const FTransform& Transform, float Radius,
+	const FVector& InitialVelocity, const FBox3DAsyncShapeOptions& Options, bool bRequireIdentity,
+	FBox3DAsyncBodyId& OutBodyId)
+{
 	check(IsInGameThread());
 	OutBodyId = 0;
 	const float NativeRadius = Radius * Box3D::UEToMeters;
 	const b3Vec3 NativeVelocity = Box3D::ToB3(InitialVelocity);
-	if (!Impl.IsValid() || !IsValidTransform(Transform) || !FMath::IsFinite(Radius) || Radius <= 0.0f
+	if (!Impl.IsValid() || !FMath::IsFinite(Options.Density) || Options.Density < 0.0f || !IsValidTransform(Transform) || !FMath::IsFinite(Radius) || Radius <= 0.0f
 		|| !FMath::IsFinite(NativeRadius) || NativeRadius <= 0.0f || !IsFiniteVector(InitialVelocity)
 		|| !IsFiniteNativeVector(NativeVelocity))
 	{
@@ -483,12 +591,17 @@ bool UBox3DAsyncSubsystem::TryCreateDynamicSphere(const FTransform& Transform, f
 	{
 		return false;
 	}
-	if (Impl->OutstandingCreationResults >= OutstandingCreationResultCapacity)
+	if (Impl->OutstandingCreationResults >= OutstandingCreationResultCapacity
+		|| (bRequireIdentity && Impl->LiveShapeIdentities + Impl->ReservedShapeIdentities >= 8192))
 	{
 		return false;
 	}
 	FImpl::FCommand& Command = Impl->Commands.AddDefaulted_GetRef();
 	Command.Type = FImpl::ECommandType::CreateSphere;
+	Command.ShapeOptions = Options;
+	Command.bHasShapeOptions = true;
+	Command.ReservedShapeIdentities = bRequireIdentity ? 1 : 0;
+	Impl->ReservedShapeIdentities += Command.ReservedShapeIdentities;
 	Command.BodyId = Impl->NextBodyId++;
 	Command.Transform = Transform;
 	Command.Dimensions.X = Radius;
@@ -785,6 +898,364 @@ bool UBox3DAsyncSubsystem::TryRemoveBody(FBox3DAsyncBodyId BodyId)
 	return true;
 }
 
+bool UBox3DAsyncSubsystem::TryRemoveBody(FBox3DAsyncBodyHandle Body)
+{
+	check(IsInGameThread());
+	return Impl.IsValid() && Body.World == Impl->QueryWorld && Body.Id != 0 && TryRemoveBody(Body.Id);
+}
+
+#if WITH_DEV_AUTOMATION_TESTS
+void UBox3DAsyncSubsystem::SetEventRecordLimitForTest(int32 Limit)
+{
+	check(IsInGameThread());
+	if (!Impl.IsValid()) return;
+	FScopeLock Lock(&Impl->QueueMutex);
+	// -1 forces a dropped batch on every step, including steps without native
+	// records, so tests can hold pressure continuously while polling recovery.
+	Impl->EventRecordLimitForTest = FMath::Clamp(Limit, -1, 1024);
+}
+#endif
+
+void UBox3DAsyncSubsystem::DrainRawEvents(TArray<FBox3DAsyncEventBatch>& OutBatches, bool& bOutGap)
+{
+	check(IsInGameThread());
+	OutBatches.Reset();
+	bOutGap = true;
+	if (!Impl.IsValid()) return;
+	FScopeLock Lock(&Impl->QueueMutex);
+	Swap(OutBatches, Impl->EventBatches);
+	bOutGap = Impl->bEventGap;
+}
+
+bool UBox3DAsyncSubsystem::TryRegisterQueryConsumer(FBox3DAsyncQueryConsumer& OutConsumer)
+{
+	check(IsInGameThread());
+	OutConsumer = {};
+	if (!Impl.IsValid()) return false;
+	FScopeLock Lock(&Impl->QueueMutex);
+	if (!Impl->bAccepting || Impl->QueryConsumers.Num() >= 32 || Impl->NextQueryConsumerId == 0) return false;
+	OutConsumer.World = Impl->QueryWorld;
+	OutConsumer.Id = Impl->NextQueryConsumerId++;
+	Impl->QueryConsumers.Add(OutConsumer.Id);
+	return true;
+}
+
+void UBox3DAsyncSubsystem::UnregisterQueryConsumer(FBox3DAsyncQueryConsumer Consumer)
+{
+	check(IsInGameThread());
+	if (!Impl.IsValid() || Consumer.World != Impl->QueryWorld) return;
+	Impl->ShutdownCallbacks.Remove(Consumer.Id);
+	TArray<FImpl::FQueryCallback> RetiredCallbacks;
+	{
+		FScopeLock Lock(&Impl->QueueMutex);
+		if (!Impl->QueryConsumers.Remove(Consumer.Id)) return;
+		for (auto It = Impl->Queries.CreateIterator(); It; ++It)
+		{
+			if (It.Value().ConsumerId != Consumer.Id) continue;
+			if (FImpl::FQueryCallback* Callback = Impl->QueryCallbacks.Find(It.Key()))
+			{
+				RetiredCallbacks.Add(MoveTemp(*Callback));
+				Impl->QueryCallbacks.Remove(It.Key());
+			}
+			if (It.Value().bExecuting) It.Value().bAbandoned = true;
+			else It.RemoveCurrent();
+		}
+	}
+}
+
+bool UBox3DAsyncSubsystem::TrySubmitQuery(FBox3DAsyncQueryConsumer Consumer, const FBox3DAsyncLineQuery& Query,
+                                           FBox3DAsyncQueryHandle& OutRequest)
+{
+	return SubmitQuery(Consumer, Query, OutRequest) == EBox3DAsyncQueryAdmission::Accepted;
+}
+
+EBox3DAsyncQueryAdmission UBox3DAsyncSubsystem::SubmitQuery(FBox3DAsyncQueryConsumer Consumer,
+	const FBox3DAsyncLineQuery& Query, FBox3DAsyncQueryHandle& OutRequest)
+{
+	check(IsInGameThread());
+	OutRequest = {};
+	if (!Impl.IsValid()) return EBox3DAsyncQueryAdmission::Unavailable;
+	FImpl* const AdmissionImpl = Impl.Get();
+	bool bAccepted = false;
+	ON_SCOPE_EXIT
+	{
+		if (!bAccepted)
+		{
+			FScopeLock Lock(&AdmissionImpl->QueueMutex);
+			++AdmissionImpl->ExchangeDiagnostics.RejectedQueries;
+		}
+	};
+	if (Consumer.World != Impl->QueryWorld) return EBox3DAsyncQueryAdmission::WrongWorld;
+	if (!IsFiniteVector(Query.Start)
+		|| !IsFiniteVector(Query.End)
+		|| Query.MaxHits < 1 || Query.MaxHits > 64 || Query.IgnoredBodies.Num() + Query.IgnoredBodyHandles.Num() > 64
+		|| Query.ConvexPoints.Num() > B3_MAX_SHAPE_CAST_POINTS
+		|| (Query.Mode != EBox3DAsyncLineMode::Any && Query.Mode != EBox3DAsyncLineMode::Closest
+			&& Query.Mode != EBox3DAsyncLineMode::Multi)
+		|| (Query.Kind != EBox3DAsyncQueryKind::Line && Query.Kind != EBox3DAsyncQueryKind::Sweep
+			&& Query.Kind != EBox3DAsyncQueryKind::Overlap && Query.Kind != EBox3DAsyncQueryKind::AabbCandidates)) return EBox3DAsyncQueryAdmission::InvalidInput;
+	for (const FBox3DAsyncBodyHandle& Handle : Query.IgnoredBodyHandles)
+		if (Handle.World != Impl->QueryWorld) return EBox3DAsyncQueryAdmission::WrongWorld;
+		else if (Handle.Id == 0) return EBox3DAsyncQueryAdmission::InvalidInput;
+	const bool bCast = Query.Kind == EBox3DAsyncQueryKind::Line || Query.Kind == EBox3DAsyncQueryKind::Sweep;
+	if (!bCast && Query.Mode == EBox3DAsyncLineMode::Closest) return EBox3DAsyncQueryAdmission::Unsupported;
+	if (bCast && Query.Start.Equals(Query.End, KINDA_SMALL_NUMBER)) return EBox3DAsyncQueryAdmission::InvalidInput;
+	const b3Vec3 Delta = Box3D::ToB3(bCast ? Query.End - Query.Start : FVector::ZeroVector);
+	if (!IsFiniteNativePosition(Box3D::ToB3Pos(Query.Start)) || !IsFiniteNativePosition(Box3D::ToB3Pos(Query.End))
+		|| !IsFiniteNativeVector(Delta) || (bCast && Delta.x == 0.0f && Delta.y == 0.0f && Delta.z == 0.0f)) return EBox3DAsyncQueryAdmission::InvalidInput;
+	// Keep broad-phase and GJK arithmetic well inside native float range, including
+	// the sums and squared distances computed by native traversal. This still
+	// admits coordinates and shapes thousands of kilometers across.
+	constexpr double MaxQueryCm = 1.0e9;
+	auto InQueryRange = [](const FVector& Value)
+	{
+		return FMath::Abs(Value.X) <= MaxQueryCm && FMath::Abs(Value.Y) <= MaxQueryCm
+			&& FMath::Abs(Value.Z) <= MaxQueryCm;
+	};
+	if (!InQueryRange(Query.Start) || (Query.Kind != EBox3DAsyncQueryKind::Overlap && !InQueryRange(Query.End))) return EBox3DAsyncQueryAdmission::InvalidInput;
+	if (Query.Kind == EBox3DAsyncQueryKind::AabbCandidates)
+	{
+		if (Query.Start.X > Query.End.X || Query.Start.Y > Query.End.Y || Query.Start.Z > Query.End.Z
+			|| !IsFiniteNativeVector(Box3D::ToB3(Query.Start)) || !IsFiniteNativeVector(Box3D::ToB3(Query.End))) return EBox3DAsyncQueryAdmission::InvalidInput;
+	}
+	if (Query.Kind == EBox3DAsyncQueryKind::Sweep || Query.Kind == EBox3DAsyncQueryKind::Overlap)
+	{
+		if (!Query.Rotation.IsNormalized() || Query.Rotation.ContainsNaN()) return EBox3DAsyncQueryAdmission::InvalidInput;
+		const auto ValidOffset = [&Query, &InQueryRange](const FVector& Offset)
+		{
+			if (!IsFiniteVector(Offset)) return false;
+			const FVector Rotated = Query.Rotation.RotateVector(Offset);
+			return IsFiniteVector(Rotated) && InQueryRange(Rotated)
+				&& IsFiniteNativeVector(Box3D::ToB3(Rotated))
+				&& IsFiniteNativePosition(Box3D::ToB3Pos(Query.Start + Rotated))
+				&& (Query.Kind != EBox3DAsyncQueryKind::Sweep
+					|| IsFiniteNativePosition(Box3D::ToB3Pos(Query.End + Rotated)));
+		};
+		const float Radius = float(double(Query.Radius) * Box3D::UEToMeters);
+		switch (Query.Shape)
+		{
+		case EBox3DAsyncQueryShape::Sphere:
+			if (!FMath::IsFinite(Radius) || Radius <= 0.0f || Query.Radius > MaxQueryCm) return EBox3DAsyncQueryAdmission::InvalidInput;
+			break;
+		case EBox3DAsyncQueryShape::Capsule:
+			if (!FMath::IsFinite(Radius) || Radius <= 0.0f || Query.Radius > MaxQueryCm || !FMath::IsFinite(Query.HalfHeight)
+				|| Query.HalfHeight < Query.Radius || !ValidOffset(FVector(0, 0, Query.HalfHeight - Query.Radius))) return EBox3DAsyncQueryAdmission::InvalidInput;
+			break;
+		case EBox3DAsyncQueryShape::Box:
+			if (!IsFiniteVector(Query.HalfExtents) || Query.HalfExtents.GetMin() <= 0.0) return EBox3DAsyncQueryAdmission::InvalidInput;
+			for (int32 Corner = 0; Corner < 8; ++Corner)
+				if (!ValidOffset(FVector((Corner & 1 ? 1.0 : -1.0) * Query.HalfExtents.X,
+				                         (Corner & 2 ? 1.0 : -1.0) * Query.HalfExtents.Y,
+				                         (Corner & 4 ? 1.0 : -1.0) * Query.HalfExtents.Z))) return EBox3DAsyncQueryAdmission::InvalidInput;
+			break;
+		case EBox3DAsyncQueryShape::Convex:
+		{
+			if (Query.ConvexPoints.Num() < 4 || Query.ConvexPoints.Num() > B3_MAX_SHAPE_CAST_POINTS) return EBox3DAsyncQueryAdmission::InvalidInput;
+			for (const FVector& Point : Query.ConvexPoints) if (!ValidOffset(Point)) return EBox3DAsyncQueryAdmission::InvalidInput;
+			// A nonzero tetrahedron is required; coplanar point clouds do not define a 3D solid.
+			const FVector Base = Query.ConvexPoints[0];
+			bool bVolume = false;
+			for (int32 I = 1; I < Query.ConvexPoints.Num() && !bVolume; ++I)
+				for (int32 J = I + 1; J < Query.ConvexPoints.Num() && !bVolume; ++J)
+					for (int32 K = J + 1; K < Query.ConvexPoints.Num() && !bVolume; ++K)
+					{
+						const double Volume = FVector::DotProduct(FVector::CrossProduct(Query.ConvexPoints[I] - Base,
+							Query.ConvexPoints[J] - Base), Query.ConvexPoints[K] - Base);
+						bVolume = FMath::IsFinite(Volume) && FMath::Abs(Volume) > UE_SMALL_NUMBER;
+					}
+			if (!bVolume) return EBox3DAsyncQueryAdmission::InvalidInput;
+			break;
+		}
+		default: return EBox3DAsyncQueryAdmission::InvalidInput;
+		}
+	}
+	FScopeLock Lock(&Impl->QueueMutex);
+	if (!Impl->bAccepting) return EBox3DAsyncQueryAdmission::Unavailable;
+	if (!Impl->QueryConsumers.Contains(Consumer.Id)) return EBox3DAsyncQueryAdmission::InvalidConsumer;
+	if (Impl->Queries.Num() >= QueryCapacity || Impl->NextQueryId == 0) return EBox3DAsyncQueryAdmission::Capacity;
+	// Charge worst-case copied inputs and retained/worker hit storage for each
+	// accepted request until it is consumed, abandoned, or fully released. The
+	// reservation includes fixed per-record overhead and an in-flight copy.
+	auto ReservedBytes = [](const FBox3DAsyncLineQuery& Desc) -> uint64
+	{
+		return 2ull * sizeof(FImpl::FQueryRecord) + 256ull
+			+ 2ull * uint64(Desc.IgnoredBodies.Num()) * sizeof(FBox3DAsyncBodyId)
+			+ 2ull * uint64(Desc.IgnoredBodyHandles.Num()) * sizeof(FBox3DAsyncBodyHandle)
+			+ 2ull * uint64(Desc.ConvexPoints.Num()) * sizeof(FVector)
+			+ uint64(Desc.MaxHits) * (3ull * sizeof(FBox3DAsyncLineHit) + 64ull);
+	};
+	uint64 WorldBytes = 0;
+	uint64 ConsumerBytes = 0;
+	int32 ConsumerCount = 0;
+	for (const TPair<uint64, FImpl::FQueryRecord>& Pair : Impl->Queries)
+	{
+		const uint64 Bytes = Pair.Value.ReservedBytes;
+		WorldBytes += Bytes;
+		if (Pair.Value.ConsumerId == Consumer.Id)
+		{
+			ConsumerBytes += Bytes;
+			++ConsumerCount;
+		}
+	}
+	const uint64 RequestedBytes = ReservedBytes(Query);
+	if (ConsumerCount >= QueryCapacityPerConsumer || WorldBytes > QueryReservedBytes
+		|| ConsumerBytes > QueryReservedBytesPerConsumer || RequestedBytes > QueryReservedBytes - WorldBytes
+		|| RequestedBytes > QueryReservedBytesPerConsumer - ConsumerBytes) return EBox3DAsyncQueryAdmission::Capacity;
+	OutRequest.World = Impl->QueryWorld;
+	OutRequest.Id = Impl->NextQueryId++;
+	FImpl::FQueryRecord& Record = Impl->Queries.Add(OutRequest.Id);
+	Record.ConsumerId = Consumer.Id;
+	Record.Query = Query;
+	Record.ReservedBytes = RequestedBytes;
+	Record.SubmittedSeconds = FPlatformTime::Seconds();
+	Record.Result.Request = OutRequest;
+	Record.Result.UserTag = Query.UserTag;
+	Record.Result.Kind = Query.Kind;
+	++Impl->ExchangeDiagnostics.AcceptedQueries;
+	Impl->ExchangeDiagnostics.PeakOutstandingQueries = FMath::Max(Impl->ExchangeDiagnostics.PeakOutstandingQueries, Impl->Queries.Num());
+	Impl->ExchangeDiagnostics.PeakQueryReservedBytes = FMath::Max(Impl->ExchangeDiagnostics.PeakQueryReservedBytes, WorldBytes + RequestedBytes);
+	bAccepted = true;
+	Impl->WakeEvent->Trigger();
+	return EBox3DAsyncQueryAdmission::Accepted;
+}
+
+bool UBox3DAsyncSubsystem::TryCancelQuery(FBox3DAsyncQueryConsumer Consumer, FBox3DAsyncQueryHandle Request)
+{
+	check(IsInGameThread());
+	if (!Impl.IsValid() || Consumer.World != Impl->QueryWorld || Request.World != Impl->QueryWorld) return false;
+	FScopeLock Lock(&Impl->QueueMutex);
+	FImpl::FQueryRecord* Record = Impl->Queries.Find(Request.Id);
+	if (!Record || Record->ConsumerId != Consumer.Id || Record->bCommitted || Record->bCancelled
+		|| !Impl->QueryConsumers.Contains(Consumer.Id)) return false;
+	Record->bCancelled = true;
+	Record->bCommitted = true;
+	if (!Record->bExecuting)
+	{
+		Record->Result.Status = EBox3DAsyncQueryStatus::Cancelled;
+		Record->Result.Hits.Reset();
+		Record->bReady = true;
+	}
+	return true;
+}
+
+bool UBox3DAsyncSubsystem::TryTakeQueryResult(FBox3DAsyncQueryConsumer Consumer, FBox3DAsyncQueryHandle Request,
+                                               FBox3DAsyncQueryResult& OutResult)
+{
+	check(IsInGameThread());
+	if (!Impl.IsValid() || Consumer.World != Impl->QueryWorld || Request.World != Impl->QueryWorld) return false;
+	FScopeLock Lock(&Impl->QueueMutex);
+	FImpl::FQueryRecord* Record = Impl->Queries.Find(Request.Id);
+	if (!Record || Record->ConsumerId != Consumer.Id || !Record->bReady || Record->bExecuting
+		|| Impl->QueryCallbacks.Contains(Request.Id) || !Impl->QueryConsumers.Contains(Consumer.Id)) return false;
+	Record->bCommitted = true;
+	Impl->RecordQueryDelivery(*Record, FPlatformTime::Seconds());
+	OutResult = MoveTemp(Record->Result);
+	Impl->Queries.Remove(Request.Id);
+	return true;
+}
+
+bool UBox3DAsyncSubsystem::TrySetQueryCallback(FBox3DAsyncQueryConsumer Consumer, FBox3DAsyncQueryHandle Request,
+                                                UObject* Owner, TFunction<void(const FBox3DAsyncQueryResult&)> Callback)
+{
+	check(IsInGameThread());
+	if (!Impl.IsValid() || Impl->bClosingQueries || !IsValid(Owner) || !Callback
+		|| Consumer.World != Impl->QueryWorld || Request.World != Impl->QueryWorld) return false;
+	FScopeLock Lock(&Impl->QueueMutex);
+	FImpl::FQueryRecord* Record = Impl->Queries.Find(Request.Id);
+	if (!Record || Record->ConsumerId != Consumer.Id || Record->bCommitted
+		|| !Impl->QueryConsumers.Contains(Consumer.Id) || Impl->QueryCallbacks.Contains(Request.Id)) return false;
+	FImpl::FQueryCallback& Entry = Impl->QueryCallbacks.Add(Request.Id);
+	Entry.Owner = Owner;
+	Entry.Callback = MoveTemp(Callback);
+	return true;
+}
+
+bool UBox3DAsyncSubsystem::SetQueryShutdownCallback(FBox3DAsyncQueryConsumer Consumer, UObject* Owner,
+                                                     TFunction<void()> Callback)
+{
+	check(IsInGameThread());
+	if (!Impl.IsValid() || Impl->bClosingQueries || Consumer.World != Impl->QueryWorld
+		|| !IsValid(Owner) || !Callback || !Impl->QueryConsumers.Contains(Consumer.Id)) return false;
+	FImpl::FShutdownCallback& Entry = Impl->ShutdownCallbacks.FindOrAdd(Consumer.Id);
+	Entry.Owner = Owner;
+	Entry.Callback = MoveTemp(Callback);
+	return true;
+}
+
+void UBox3DAsyncSubsystem::PumpQueryCallbacks()
+{
+	DispatchQueryCallbacks(false);
+}
+
+#if WITH_DEV_AUTOMATION_TESTS
+void UBox3DAsyncSubsystem::SetQueryTestGate(int32 Gate)
+{
+	check(IsInGameThread());
+	if (Impl.IsValid())
+	{
+		Impl->QueryTestGate.Store(Gate);
+		if (Impl->WakeEvent) Impl->WakeEvent->Trigger();
+	}
+}
+
+int32 UBox3DAsyncSubsystem::GetQueryTestGateReached() const
+{
+	check(IsInGameThread());
+	return Impl.IsValid() ? Impl->QueryTestGateReached.Load() : 0;
+}
+
+int32 UBox3DAsyncSubsystem::GetQueryTestPhase(FBox3DAsyncQueryHandle Request) const
+{
+	check(IsInGameThread());
+	if (!Impl.IsValid() || Request.World != Impl->QueryWorld) return -1;
+	FScopeLock Lock(&Impl->QueueMutex);
+	const FImpl::FQueryRecord* Record = Impl->Queries.Find(Request.Id);
+	return !Record ? -1 : Record->bExecuting ? 1 : Record->bReady ? 2 : 0;
+}
+#endif
+
+void UBox3DAsyncSubsystem::DispatchQueryCallbacks(bool bShutdown)
+{
+	check(IsInGameThread());
+	if (!Impl.IsValid() || (Impl->bDispatchingQueries && !bShutdown)) return;
+	FImpl* const DispatchImpl = Impl.Get();
+	const bool bWasDispatching = DispatchImpl->bDispatchingQueries;
+	DispatchImpl->bDispatchingQueries = true;
+	TArray<uint64> CallbackRequests;
+	{
+		FScopeLock Lock(&Impl->QueueMutex);
+		for (auto& Pair : Impl->Queries)
+		{
+			FImpl::FQueryRecord& Record = Pair.Value;
+			if (!Record.bReady || Record.bExecuting) continue;
+			Record.bCommitted = true;
+			if (Impl->QueryCallbacks.Contains(Pair.Key)) CallbackRequests.Add(Pair.Key);
+		}
+	}
+	CallbackRequests.Sort();
+	for (uint64 RequestId : CallbackRequests)
+	{
+		FBox3DAsyncQueryResult Result;
+		FImpl::FQueryCallback Entry;
+		{
+			FScopeLock Lock(&Impl->QueueMutex);
+			FImpl::FQueryRecord* Record = Impl->Queries.Find(RequestId);
+			FImpl::FQueryCallback* Registered = Impl->QueryCallbacks.Find(RequestId);
+			if (!Record || !Registered || !Record->bReady || Record->bExecuting
+				|| !Impl->QueryConsumers.Contains(Record->ConsumerId)) continue;
+			if (Registered->Owner.IsValid()) Impl->RecordQueryDelivery(*Record, FPlatformTime::Seconds());
+			Result = MoveTemp(Record->Result);
+			Entry = MoveTemp(*Registered);
+			Impl->QueryCallbacks.Remove(RequestId);
+			Impl->Queries.Remove(RequestId);
+		}
+		if (Entry.Owner.IsValid() && Entry.Callback) Entry.Callback(Result);
+		// A handler may tear down the world and destroy the subsystem state.
+		if (Impl.Get() != DispatchImpl) return;
+	}
+	DispatchImpl->bDispatchingQueries = bWasDispatching;
+}
+
 bool UBox3DAsyncSubsystem::TrySubmitLineTrace(const FVector& Start, const FVector& End,
                                               FBox3DAsyncTraceRequestId& OutRequestId)
 {
@@ -979,5 +1450,32 @@ FBox3DAsyncDiagnostics UBox3DAsyncSubsystem::GetDiagnostics() const
 	Result.OutstandingCreationResults = Impl->OutstandingCreationResults;
 	Result.ReservedMeshGeometryBytes = Impl->ReservedGeometryBytes;
 	Result.RegisteredMeshGeometries = Impl->AcceptedGeometryIds.Num();
+	const FBox3DAsyncDiagnostics& Exchange = Impl->ExchangeDiagnostics;
+	Result.AcceptedQueries = Exchange.AcceptedQueries;
+	Result.RejectedQueries = Exchange.RejectedQueries;
+	Result.TruncatedQueries = Exchange.TruncatedQueries;
+	Result.OutstandingQueries = Impl->Queries.Num();
+	Result.PeakOutstandingQueries = Exchange.PeakOutstandingQueries;
+	for (const auto& Pair : Impl->Queries) Result.QueryReservedBytes += Pair.Value.ReservedBytes;
+	Result.PeakQueryReservedBytes = Exchange.PeakQueryReservedBytes;
+	Result.ExecutedQueries = Exchange.ExecutedQueries;
+	Result.TotalQueryExecutionSeconds = Exchange.TotalQueryExecutionSeconds;
+	Result.MaxQueryExecutionSeconds = Exchange.MaxQueryExecutionSeconds;
+	Result.DeliveredQueryResults = Exchange.DeliveredQueryResults;
+	Result.TotalQueryLatencySeconds = Exchange.TotalQueryLatencySeconds;
+	Result.MaxQueryLatencySeconds = Exchange.MaxQueryLatencySeconds;
+	Result.EventIngressBatches = Impl->EventIngress.Num();
+	Result.PeakEventIngressBatches = Exchange.PeakEventIngressBatches;
+	Result.EventIngressBytes = FImpl::EventArrayBytes(Impl->EventIngress);
+	Result.PeakEventIngressBytes = Exchange.PeakEventIngressBytes;
+	Result.EventHistoryBatches = Impl->EventHistory.Num();
+	Result.PeakEventHistoryBatches = Exchange.PeakEventHistoryBatches;
+	Result.EventHistoryBytes = FImpl::EventArrayBytes(Impl->EventHistory);
+	Result.PeakEventHistoryBytes = Exchange.PeakEventHistoryBytes;
+	Result.EventBaselineBytes = Impl->EventBaseline.Events.GetAllocatedSize();
+	Result.DroppedEventBatches = Exchange.DroppedEventBatches;
+	Result.DroppedEventRecords = Exchange.DroppedEventRecords;
+	Result.EventResyncs = Exchange.EventResyncs;
+	Result.EventBaselineUnavailable = Exchange.EventBaselineUnavailable;
 	return Result;
 }
