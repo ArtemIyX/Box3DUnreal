@@ -54,6 +54,8 @@ struct UBox3DAsyncSubsystem::FImpl
 		FVector Dimensions = FVector::ZeroVector;
 		FVector InitialVelocity = FVector::ZeroVector;
 		FVector Scale = FVector::OneVector;
+		FBox3DAsyncShapeOptions ShapeOptions;
+		bool bHasShapeOptions = false;
 		uint64 PayloadBytes = 0;
 		TArray<b3Vec3> Vertices;
 		TArray<int32> Indices;
@@ -65,6 +67,17 @@ struct UBox3DAsyncSubsystem::FImpl
 		FBox3DAsyncTraceRequestId RequestId = 0;
 		FVector Start = FVector::ZeroVector;
 		FVector End = FVector::ZeroVector;
+	};
+
+	struct FQueryRecord
+	{
+		uint64 ConsumerId = 0;
+		FBox3DAsyncLineQuery Query;
+		FBox3DAsyncQueryResult Result;
+		bool bExecuting = false;
+		bool bReady = false;
+		bool bCancelled = false;
+		bool bAbandoned = false;
 	};
 
 	struct FSnapshot
@@ -112,7 +125,10 @@ struct UBox3DAsyncSubsystem::FImpl
 
 	private:
 		void ApplyCommands();
-		void ExecuteTraces();
+		void ExecuteTraces(double Deadline);
+		void ExecuteQueries(double Deadline);
+		bool RegisterBodyShapes(b3BodyId BodyId, FBox3DAsyncBodyId PublicBody, TArray<FBox3DAsyncShapeId>& OutShapeIds);
+		void CollectEvents(uint64 Step);
 		void StepAndPublish(double ScheduledTime, bool bAdvanceSimulation = true);
 		FImpl& Owner;
 	};
@@ -132,8 +148,23 @@ struct UBox3DAsyncSubsystem::FImpl
 	FCriticalSection SnapshotMutex;
 	TArray<FCommand> Commands;
 	TArray<FTraceRequest> TraceRequests;
+	FGuid QueryWorld = FGuid::NewGuid();
+	uint64 NextQueryConsumerId = 1;
+	uint64 NextQueryId = 1;
+	TSet<uint64> QueryConsumers;
+	TMap<uint64, FQueryRecord> Queries;
 	TArray<FBox3DAsyncTraceResult> TraceResults;
 	TArray<FBox3DAsyncCreationResult> CreationResults;
+	struct FShapeIdentity { FBox3DAsyncBodyId Body = 0; FBox3DAsyncShapeId Shape = 0; };
+	TMap<uint64, FShapeIdentity> WorkerShapes;
+	TMap<uint64, FBox3DAsyncEvent> ActiveContacts;
+	TArray<FBox3DAsyncEvent> ActiveSensors;
+	TSet<FBox3DAsyncBodyId> PendingRemovedBodies;
+	TSet<FBox3DAsyncBodyId> RetiringBodies;
+	uint64 NextShapeId = 1;
+	uint64 NextEventSequence = 1;
+	TArray<FBox3DAsyncEventBatch> EventBatches;
+	bool bEventGap = false;
 	int32 InFlightTraces = 0;
 	TSet<FBox3DAsyncBodyId> AcceptedBodyIds;
 	TSet<FBox3DAsyncGeometryId> AcceptedGeometryIds;
@@ -162,7 +193,7 @@ struct UBox3DAsyncSubsystem::FImpl
 	bool bStatsRegistered = false;
 
 	void PublishCreationResult(EBox3DAsyncCreationKind Kind, uint64 ResourceId, bool bSucceeded,
-	                           int32 DegenerateCount = 0, int32 DroppedTriangleCount = 0)
+	                           int32 DegenerateCount = 0, int32 DroppedTriangleCount = 0, TArray<FBox3DAsyncShapeId> ShapeIds = {})
 	{
 		FScopeLock Lock(&QueueMutex);
 		FBox3DAsyncCreationResult& Result = CreationResults.AddDefaulted_GetRef();
@@ -171,6 +202,7 @@ struct UBox3DAsyncSubsystem::FImpl
 		Result.bSucceeded = bSucceeded;
 		Result.DegenerateTriangleCount = DegenerateCount;
 		Result.DroppedTriangleCount = DroppedTriangleCount;
+		Result.ShapeIds = MoveTemp(ShapeIds);
 	}
 
 	void Shutdown()

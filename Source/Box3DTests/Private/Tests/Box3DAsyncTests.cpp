@@ -274,3 +274,179 @@ bool FBox3DAsyncWeldedTriangleLossTest::RunTest(const FString& Parameters)
 	return true;
 }
 #endif
+#if WITH_DEV_AUTOMATION_TESTS
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FBox3DAsyncOwnedLineQueryTest,
+	"Box3D.Async.OwnedLineQuery", EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FBox3DAsyncOwnedLineQueryTest::RunTest(const FString& Parameters)
+{
+	Box3DTest::FTestWorld First(TEXT("OwnedLineFirst"));
+	Box3DTest::FTestWorld Second(TEXT("OwnedLineSecond"));
+	UBox3DAsyncSubsystem* Physics = First.World->GetSubsystem<UBox3DAsyncSubsystem>();
+	UBox3DAsyncSubsystem* OtherWorld = Second.World->GetSubsystem<UBox3DAsyncSubsystem>();
+	if (!TestNotNull(TEXT("Async subsystem"), Physics) || !TestNotNull(TEXT("Other world"), OtherWorld)) return false;
+	FBox3DAsyncQueryConsumer A, B, Foreign;
+	if (!TestTrue(TEXT("Register A"), Physics->TryRegisterQueryConsumer(A))
+		|| !TestTrue(TEXT("Register B"), Physics->TryRegisterQueryConsumer(B))
+		|| !TestTrue(TEXT("Register foreign"), OtherWorld->TryRegisterQueryConsumer(Foreign))) return false;
+	FBox3DAsyncBodyId Body = 0;
+	if (!TestTrue(TEXT("Create box"), Physics->TryCreateStaticBox(FTransform::Identity, FVector(50), Body))) return false;
+	const double CreationDeadline = FPlatformTime::Seconds() + 5.0;
+	bool bCreated = false;
+	while (FPlatformTime::Seconds() < CreationDeadline && !bCreated)
+	{
+		TArray<FBox3DAsyncCreationResult> Results;
+		Physics->DrainCreationResults(Results);
+		for (const auto& Result : Results) if (Result.ResourceId == Body) bCreated = Result.bSucceeded;
+		if (!bCreated) FPlatformProcess::Sleep(0.01f);
+	}
+	if (!TestTrue(TEXT("Box created"), bCreated)) return false;
+	FBox3DAsyncLineQuery Query;
+	Query.Start = FVector(-200, 0, 0);
+	Query.End = FVector(200, 0, 0);
+	Query.UserTag = 42;
+	FBox3DAsyncQueryHandle Request;
+	TestFalse(TEXT("Foreign consumer rejected"), Physics->TrySubmitQuery(Foreign, Query, Request));
+	if (!TestTrue(TEXT("Query accepted"), Physics->TrySubmitQuery(A, Query, Request))) return false;
+	FBox3DAsyncQueryResult Result;
+	TestFalse(TEXT("Wrong owner cannot take"), Physics->TryTakeQueryResult(B, Request, Result));
+	const double Deadline = FPlatformTime::Seconds() + 5.0;
+	bool bReady = false;
+	while (FPlatformTime::Seconds() < Deadline && !(bReady = Physics->TryTakeQueryResult(A, Request, Result)))
+		FPlatformProcess::Sleep(0.01f);
+	if (!TestTrue(TEXT("Result completed"), bReady)) return false;
+	TestTrue(TEXT("Hit"), Result.Status == EBox3DAsyncQueryStatus::Hit);
+	TestEqual(TEXT("Tag preserved"), Result.UserTag, uint64(42));
+	if (TestEqual(TEXT("One hit"), Result.Hits.Num(), 1)) TestEqual(TEXT("Body identity"), Result.Hits[0].BodyId, Body);
+	TestFalse(TEXT("Result consumed once"), Physics->TryTakeQueryResult(A, Request, Result));
+	return true;
+}
+#endif
+#if WITH_DEV_AUTOMATION_TESTS
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FBox3DAsyncRawSensorEventTest,
+	"Box3D.Async.RawSensorEvent", EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FBox3DAsyncRawSensorEventTest::RunTest(const FString& Parameters)
+{
+	Box3DTest::FTestWorld TestWorld(TEXT("RawSensorEvents"));
+	UBox3DAsyncSubsystem* Physics = TestWorld.World->GetSubsystem<UBox3DAsyncSubsystem>();
+	if (!TestNotNull(TEXT("Async subsystem"), Physics)) return false;
+	FBox3DAsyncShapeOptions SensorOptions;
+	SensorOptions.bSensor = true;
+	FBox3DAsyncShapeOptions VisitorOptions;
+	VisitorOptions.bDetectableBySensors = true;
+	FBox3DAsyncBodyId Sensor = 0, Visitor = 0;
+	if (!TestTrue(TEXT("Sensor admitted"), Physics->TryCreateStaticBox(FTransform::Identity, FVector(200), SensorOptions, Sensor))
+		|| !TestTrue(TEXT("Visitor admitted"), Physics->TryCreateDynamicSphere(FTransform::Identity, 25, FVector::ZeroVector,
+			VisitorOptions, Visitor))) return false;
+	FBox3DAsyncShapeId SensorShape = 0, VisitorShape = 0, EventSensorShape = 0, EventVisitorShape = 0;
+	bool bEnter = false, bGap = false;
+	const double Deadline = FPlatformTime::Seconds() + 5.0;
+	while (FPlatformTime::Seconds() < Deadline && (!bEnter || !SensorShape || !VisitorShape))
+	{
+		TArray<FBox3DAsyncCreationResult> Results;
+		Physics->DrainCreationResults(Results);
+		for (const FBox3DAsyncCreationResult& Result : Results)
+		{
+			if (Result.bSucceeded && Result.ShapeIds.Num() == 1)
+			{
+				if (Result.ResourceId == Sensor) SensorShape = Result.ShapeIds[0];
+				if (Result.ResourceId == Visitor) VisitorShape = Result.ShapeIds[0];
+			}
+		}
+		TArray<FBox3DAsyncEventBatch> Batches;
+		Physics->DrainRawEvents(Batches, bGap);
+		for (const FBox3DAsyncEventBatch& Batch : Batches)
+			for (const FBox3DAsyncEvent& Event : Batch.Events)
+				if (Event.Kind == EBox3DAsyncEventKind::SensorEnter && Event.BodyA == Sensor && Event.BodyB == Visitor)
+				{
+					bEnter = true;
+					EventSensorShape = Event.ShapeA;
+					EventVisitorShape = Event.ShapeB;
+					TestTrue(TEXT("Real step stamped"), Batch.Step > 0);
+				}
+		if (bGap) break;
+		FPlatformProcess::Sleep(0.01f);
+	}
+	TestFalse(TEXT("No gap before removal"), bGap);
+	TestTrue(TEXT("Sensor enter received"), bEnter);
+	TestTrue(TEXT("Creation acknowledged shape identities"), SensorShape != 0 && VisitorShape != 0);
+	TestEqual(TEXT("Sensor shape identity"), EventSensorShape, SensorShape);
+	TestEqual(TEXT("Visitor shape identity"), EventVisitorShape, VisitorShape);
+	FBox3DAsyncBodyId Unrelated = 0;
+	if (!TestTrue(TEXT("Unrelated box admitted"), Physics->TryCreateStaticBox(
+		FTransform(FVector(10000, 0, 0)), FVector(20), Unrelated))) return false;
+	bool bUnrelatedCreated = false;
+	const double UnrelatedDeadline = FPlatformTime::Seconds() + 5.0;
+	while (!bUnrelatedCreated && FPlatformTime::Seconds() < UnrelatedDeadline)
+	{
+		TArray<FBox3DAsyncCreationResult> Results;
+		Physics->DrainCreationResults(Results);
+		for (const auto& Creation : Results)
+			if (Creation.ResourceId == Unrelated) bUnrelatedCreated = Creation.bSucceeded;
+		if (!bUnrelatedCreated) FPlatformProcess::Sleep(0.01f);
+	}
+	if (!TestTrue(TEXT("Unrelated box created"), bUnrelatedCreated)
+		|| !TestTrue(TEXT("Unrelated removal admitted"), Physics->TryRemoveBody(Unrelated))) return false;
+	const uint64 BeforeRemoval = Physics->GetCompletedStepCount();
+	const double RemovalDeadline = FPlatformTime::Seconds() + 5.0;
+	while (Physics->GetCompletedStepCount() < BeforeRemoval + 2 && FPlatformTime::Seconds() < RemovalDeadline)
+		FPlatformProcess::Sleep(0.01f);
+	TArray<FBox3DAsyncEventBatch> PriorBatches;
+	Physics->DrainRawEvents(PriorBatches, bGap);
+	TestFalse(TEXT("Unrelated removal preserves stream"), bGap);
+	if (!TestTrue(TEXT("Removal admitted"), Physics->TryRemoveBody(Visitor))) return false;
+	const double ExitDeadline = FPlatformTime::Seconds() + 5.0;
+	int32 ExitCount = 0;
+	while (ExitCount == 0 && !bGap && FPlatformTime::Seconds() < ExitDeadline)
+	{
+		TArray<FBox3DAsyncEventBatch> Batches;
+		Physics->DrainRawEvents(Batches, bGap);
+		for (const FBox3DAsyncEventBatch& Batch : Batches)
+			for (const FBox3DAsyncEvent& Event : Batch.Events)
+				if (Event.Kind == EBox3DAsyncEventKind::SensorExit && Event.ShapeA == SensorShape && Event.ShapeB == VisitorShape)
+				{
+					++ExitCount;
+					TestTrue(TEXT("Exit attributed to removal"), Event.EndCause == EBox3DAsyncEventEndCause::Removed);
+				}
+		if (ExitCount == 0 && !bGap) FPlatformProcess::Sleep(0.01f);
+	}
+	TestEqual(TEXT("One removal exit"), ExitCount, 1);
+	TestFalse(TEXT("Removal does not lose stream"), bGap);
+	const uint64 AfterExit = Physics->GetCompletedStepCount();
+	const double LaterDeadline = FPlatformTime::Seconds() + 5.0;
+	while (Physics->GetCompletedStepCount() < AfterExit + 3 && FPlatformTime::Seconds() < LaterDeadline)
+		FPlatformProcess::Sleep(0.01f);
+	TArray<FBox3DAsyncEventBatch> LaterBatches;
+	Physics->DrainRawEvents(LaterBatches, bGap);
+	for (const FBox3DAsyncEventBatch& Batch : LaterBatches)
+		for (const FBox3DAsyncEvent& Event : Batch.Events)
+			if (Event.Kind == EBox3DAsyncEventKind::SensorExit && Event.ShapeA == SensorShape && Event.ShapeB == VisitorShape) ++ExitCount;
+	TestEqual(TEXT("No duplicate late exit"), ExitCount, 1);
+	TestFalse(TEXT("No gap after late native events"), bGap);
+	FBox3DAsyncBodyId Replacement = 0;
+	if (!TestTrue(TEXT("Replacement admitted"), Physics->TryCreateDynamicSphere(FTransform::Identity, 25,
+		FVector::ZeroVector, VisitorOptions, Replacement))) return false;
+	FBox3DAsyncShapeId ReplacementShape = 0, ReplacementEventShape = 0;
+	const double ReplacementDeadline = FPlatformTime::Seconds() + 5.0;
+	while ((!ReplacementShape || !ReplacementEventShape) && !bGap && FPlatformTime::Seconds() < ReplacementDeadline)
+	{
+		TArray<FBox3DAsyncCreationResult> Results;
+		Physics->DrainCreationResults(Results);
+		for (const auto& Creation : Results)
+			if (Creation.ResourceId == Replacement && Creation.bSucceeded && Creation.ShapeIds.Num() == 1)
+				ReplacementShape = Creation.ShapeIds[0];
+		TArray<FBox3DAsyncEventBatch> Batches;
+		Physics->DrainRawEvents(Batches, bGap);
+		for (const auto& Batch : Batches)
+			for (const auto& Event : Batch.Events)
+				if (Event.Kind == EBox3DAsyncEventKind::SensorEnter && Event.BodyB == Replacement)
+					ReplacementEventShape = Event.ShapeB;
+		if (!ReplacementShape || !ReplacementEventShape) FPlatformProcess::Sleep(0.01f);
+	}
+	TestTrue(TEXT("Replacement has a new public shape ID"), ReplacementShape != 0 && ReplacementShape != VisitorShape);
+	TestEqual(TEXT("Replacement event resolves new identity"), ReplacementEventShape, ReplacementShape);
+	TestFalse(TEXT("Replacement preserves stream"), bGap);
+	return true;
+}
+#endif

@@ -389,6 +389,7 @@ void UBox3DAsyncSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 	WorldDef.enableSleep = Settings->bEnableSleep;
 	WorldDef.enableContinuous = Settings->bEnableContinuous;
 	WorldDef.workerCount = 1;
+	WorldDef.hitEventThreshold = Settings->HitEventThreshold * Box3D::UEToMeters;
 	Impl->WorldId = b3CreateWorld(&WorldDef);
 	if (!b3World_IsValid(Impl->WorldId))
 	{
@@ -434,10 +435,20 @@ void UBox3DAsyncSubsystem::Deinitialize()
 bool UBox3DAsyncSubsystem::TryCreateStaticBox(const FTransform& Transform, const FVector& HalfExtents,
                                               FBox3DAsyncBodyId& OutBodyId)
 {
+	FBox3DAsyncShapeOptions Options;
+	Options.CategoryBits = 1;
+	Options.MaskBits = 3;
+	Options.Density = b3DefaultShapeDef().density;
+	return TryCreateStaticBox(Transform, HalfExtents, Options, OutBodyId);
+}
+
+bool UBox3DAsyncSubsystem::TryCreateStaticBox(const FTransform& Transform, const FVector& HalfExtents,
+                                              const FBox3DAsyncShapeOptions& Options, FBox3DAsyncBodyId& OutBodyId)
+{
 	check(IsInGameThread());
 	OutBodyId = 0;
 	const b3Vec3 NativeHalfExtents = Box3D::ToB3(HalfExtents);
-	if (!Impl.IsValid() || !IsValidTransform(Transform) || !IsFiniteVector(HalfExtents)
+	if (!Impl.IsValid() || !FMath::IsFinite(Options.Density) || Options.Density < 0.0f || !IsValidTransform(Transform) || !IsFiniteVector(HalfExtents)
 		|| HalfExtents.X <= 0.0 || HalfExtents.Y <= 0.0 || HalfExtents.Z <= 0.0
 		|| !IsFiniteNativeVector(NativeHalfExtents) || NativeHalfExtents.x <= 0.0f || NativeHalfExtents.y <= 0.0f ||
 		NativeHalfExtents.z <= 0.0f)
@@ -455,6 +466,8 @@ bool UBox3DAsyncSubsystem::TryCreateStaticBox(const FTransform& Transform, const
 	}
 	FImpl::FCommand& Command = Impl->Commands.AddDefaulted_GetRef();
 	Command.Type = FImpl::ECommandType::CreateBox;
+	Command.ShapeOptions = Options;
+	Command.bHasShapeOptions = true;
 	Command.BodyId = Impl->NextBodyId++;
 	Command.Transform = Transform;
 	Command.Dimensions = HalfExtents;
@@ -468,11 +481,23 @@ bool UBox3DAsyncSubsystem::TryCreateStaticBox(const FTransform& Transform, const
 bool UBox3DAsyncSubsystem::TryCreateDynamicSphere(const FTransform& Transform, float Radius,
                                                   const FVector& InitialVelocity, FBox3DAsyncBodyId& OutBodyId)
 {
+	FBox3DAsyncShapeOptions Options;
+	Options.CategoryBits = 2;
+	Options.MaskBits = 3;
+	// Preserve Box3D's configured default density for the legacy creation API.
+	Options.Density = b3DefaultShapeDef().density;
+	return TryCreateDynamicSphere(Transform, Radius, InitialVelocity, Options, OutBodyId);
+}
+
+bool UBox3DAsyncSubsystem::TryCreateDynamicSphere(const FTransform& Transform, float Radius,
+                                                  const FVector& InitialVelocity, const FBox3DAsyncShapeOptions& Options,
+                                                  FBox3DAsyncBodyId& OutBodyId)
+{
 	check(IsInGameThread());
 	OutBodyId = 0;
 	const float NativeRadius = Radius * Box3D::UEToMeters;
 	const b3Vec3 NativeVelocity = Box3D::ToB3(InitialVelocity);
-	if (!Impl.IsValid() || !IsValidTransform(Transform) || !FMath::IsFinite(Radius) || Radius <= 0.0f
+	if (!Impl.IsValid() || !FMath::IsFinite(Options.Density) || Options.Density < 0.0f || !IsValidTransform(Transform) || !FMath::IsFinite(Radius) || Radius <= 0.0f
 		|| !FMath::IsFinite(NativeRadius) || NativeRadius <= 0.0f || !IsFiniteVector(InitialVelocity)
 		|| !IsFiniteNativeVector(NativeVelocity))
 	{
@@ -489,6 +514,8 @@ bool UBox3DAsyncSubsystem::TryCreateDynamicSphere(const FTransform& Transform, f
 	}
 	FImpl::FCommand& Command = Impl->Commands.AddDefaulted_GetRef();
 	Command.Type = FImpl::ECommandType::CreateSphere;
+	Command.ShapeOptions = Options;
+	Command.bHasShapeOptions = true;
 	Command.BodyId = Impl->NextBodyId++;
 	Command.Transform = Transform;
 	Command.Dimensions.X = Radius;
@@ -782,6 +809,101 @@ bool UBox3DAsyncSubsystem::TryRemoveBody(FBox3DAsyncBodyId BodyId)
 	Command.BodyId = BodyId;
 	Impl->AcceptedBodyIds.Remove(BodyId);
 	Impl->WakeEvent->Trigger();
+	return true;
+}
+
+void UBox3DAsyncSubsystem::DrainRawEvents(TArray<FBox3DAsyncEventBatch>& OutBatches, bool& bOutGap)
+{
+	check(IsInGameThread());
+	OutBatches.Reset();
+	bOutGap = true;
+	if (!Impl.IsValid()) return;
+	FScopeLock Lock(&Impl->QueueMutex);
+	Swap(OutBatches, Impl->EventBatches);
+	bOutGap = Impl->bEventGap;
+}
+
+bool UBox3DAsyncSubsystem::TryRegisterQueryConsumer(FBox3DAsyncQueryConsumer& OutConsumer)
+{
+	check(IsInGameThread());
+	OutConsumer = {};
+	if (!Impl.IsValid()) return false;
+	FScopeLock Lock(&Impl->QueueMutex);
+	if (!Impl->bAccepting || Impl->QueryConsumers.Num() >= 32 || Impl->NextQueryConsumerId == 0) return false;
+	OutConsumer.World = Impl->QueryWorld;
+	OutConsumer.Id = Impl->NextQueryConsumerId++;
+	Impl->QueryConsumers.Add(OutConsumer.Id);
+	return true;
+}
+
+void UBox3DAsyncSubsystem::UnregisterQueryConsumer(FBox3DAsyncQueryConsumer Consumer)
+{
+	check(IsInGameThread());
+	if (!Impl.IsValid() || Consumer.World != Impl->QueryWorld) return;
+	FScopeLock Lock(&Impl->QueueMutex);
+	if (!Impl->QueryConsumers.Remove(Consumer.Id)) return;
+	for (auto It = Impl->Queries.CreateIterator(); It; ++It)
+	{
+		if (It.Value().ConsumerId != Consumer.Id) continue;
+		if (It.Value().bExecuting) It.Value().bAbandoned = true;
+		else It.RemoveCurrent();
+	}
+}
+
+bool UBox3DAsyncSubsystem::TrySubmitQuery(FBox3DAsyncQueryConsumer Consumer, const FBox3DAsyncLineQuery& Query,
+                                           FBox3DAsyncQueryHandle& OutRequest)
+{
+	check(IsInGameThread());
+	OutRequest = {};
+	if (!Impl.IsValid() || Consumer.World != Impl->QueryWorld || !IsFiniteVector(Query.Start)
+		|| !IsFiniteVector(Query.End) || Query.Start.Equals(Query.End, KINDA_SMALL_NUMBER)
+		|| Query.MaxHits < 1 || Query.MaxHits > 64 || Query.IgnoredBodies.Num() > 64
+		|| (Query.Mode != EBox3DAsyncLineMode::Any && Query.Mode != EBox3DAsyncLineMode::Closest
+			&& Query.Mode != EBox3DAsyncLineMode::Multi)) return false;
+	const b3Vec3 Delta = Box3D::ToB3(Query.End - Query.Start);
+	if (!IsFiniteNativePosition(Box3D::ToB3Pos(Query.Start)) || !IsFiniteNativePosition(Box3D::ToB3Pos(Query.End))
+		|| !IsFiniteNativeVector(Delta) || (Delta.x == 0.0f && Delta.y == 0.0f && Delta.z == 0.0f)) return false;
+	FScopeLock Lock(&Impl->QueueMutex);
+	if (!Impl->bAccepting || !Impl->QueryConsumers.Contains(Consumer.Id) || Impl->Queries.Num() >= 64
+		|| Impl->NextQueryId == 0) return false;
+	OutRequest.World = Impl->QueryWorld;
+	OutRequest.Id = Impl->NextQueryId++;
+	FImpl::FQueryRecord& Record = Impl->Queries.Add(OutRequest.Id);
+	Record.ConsumerId = Consumer.Id;
+	Record.Query = Query;
+	Record.Result.Request = OutRequest;
+	Record.Result.UserTag = Query.UserTag;
+	Impl->WakeEvent->Trigger();
+	return true;
+}
+
+bool UBox3DAsyncSubsystem::TryCancelQuery(FBox3DAsyncQueryConsumer Consumer, FBox3DAsyncQueryHandle Request)
+{
+	check(IsInGameThread());
+	if (!Impl.IsValid() || Consumer.World != Impl->QueryWorld || Request.World != Impl->QueryWorld) return false;
+	FScopeLock Lock(&Impl->QueueMutex);
+	FImpl::FQueryRecord* Record = Impl->Queries.Find(Request.Id);
+	if (!Record || Record->ConsumerId != Consumer.Id || Record->bReady || Record->bCancelled
+		|| !Impl->QueryConsumers.Contains(Consumer.Id)) return false;
+	Record->bCancelled = true;
+	if (!Record->bExecuting)
+	{
+		Record->Result.Status = EBox3DAsyncQueryStatus::Cancelled;
+		Record->bReady = true;
+	}
+	return true;
+}
+
+bool UBox3DAsyncSubsystem::TryTakeQueryResult(FBox3DAsyncQueryConsumer Consumer, FBox3DAsyncQueryHandle Request,
+                                               FBox3DAsyncQueryResult& OutResult)
+{
+	check(IsInGameThread());
+	if (!Impl.IsValid() || Consumer.World != Impl->QueryWorld || Request.World != Impl->QueryWorld) return false;
+	FScopeLock Lock(&Impl->QueueMutex);
+	FImpl::FQueryRecord* Record = Impl->Queries.Find(Request.Id);
+	if (!Record || Record->ConsumerId != Consumer.Id || !Record->bReady || !Impl->QueryConsumers.Contains(Consumer.Id)) return false;
+	OutResult = MoveTemp(Record->Result);
+	Impl->Queries.Remove(Request.Id);
 	return true;
 }
 
