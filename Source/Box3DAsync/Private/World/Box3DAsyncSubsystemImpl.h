@@ -63,6 +63,7 @@ struct UBox3DAsyncSubsystem::FImpl
 		FTransform Transform = FTransform::Identity;
 		FVector Dimensions = FVector::ZeroVector;
 		FVector InitialVelocity = FVector::ZeroVector;
+		float GravityScale = 1.0f;
 		FVector Scale = FVector::OneVector;
 		FBox3DAsyncShapeOptions ShapeOptions;
 		bool bHasShapeOptions = false;
@@ -99,6 +100,9 @@ struct UBox3DAsyncSubsystem::FImpl
 
 	struct FSnapshot
 	{
+		uint64 CaptureSerial = 0;
+		double CaptureMonotonicSeconds = 0.0;
+		FBox3DAsyncSampleStamp SimulationSample;
 		double ScheduledTime = 0.0;
 		TArray<FBox3DAsyncPose> Poses;
 	};
@@ -168,6 +172,7 @@ struct UBox3DAsyncSubsystem::FImpl
 	FCriticalSection DiagnosticsMutex;
 	uint64 CompletedSteps = 0;
 	FBox3DAsyncSampleStamp CompletedSample;
+	uint64 CaptureSerial = 0;
 	uint64 ClockEpoch = 0;
 	uint64 NativeCreationFailures = 0;
 	uint64 DeadlineMisses = 0;

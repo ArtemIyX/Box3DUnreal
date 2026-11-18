@@ -19,7 +19,7 @@ namespace
 
 	bool CopyBodyShapes(const FBox3DAsyncBodyDesc& Desc, TArray<Box3DAsyncPrivate::FCopiedBodyShape>& Out, uint64& Bytes)
 	{
-		if (!ValidTransform(Desc.Transform) || !ValidPoint(Desc.InitialVelocity)
+		if (!ValidTransform(Desc.Transform) || !ValidPoint(Desc.InitialVelocity) || !FMath::IsFinite(Desc.GravityScale)
 			|| (Desc.Motion != EBox3DAsyncBodyMotion::Static && Desc.Motion != EBox3DAsyncBodyMotion::Dynamic)
 			|| Desc.Shapes.IsEmpty() || Desc.Shapes.Num() > 256) return false;
 		Bytes = 0;
@@ -124,6 +124,7 @@ bool UBox3DAsyncSubsystem::TryCreateBody(FBox3DAsyncCreationConsumer Consumer, c
 	Command.bDynamic = Desc.Motion == EBox3DAsyncBodyMotion::Dynamic;
 	Command.Transform = Desc.Transform;
 	Command.InitialVelocity = Desc.InitialVelocity;
+	Command.GravityScale = Desc.GravityScale;
 	Command.PayloadBytes = PayloadBytes;
 	Command.ReservedShapeIdentities = Command.BodyShapes.Num();
 	FScopeLock Lock(&Impl->QueueMutex);

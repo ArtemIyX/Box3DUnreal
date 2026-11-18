@@ -75,6 +75,7 @@ struct BOX3DASYNC_API FBox3DAsyncBodyDesc
 	EBox3DAsyncBodyMotion Motion = EBox3DAsyncBodyMotion::Static;
 	FTransform Transform = FTransform::Identity;
 	FVector InitialVelocity = FVector::ZeroVector;
+	float GravityScale = 1.0f;
 	TArray<FBox3DAsyncBodyShapeDesc> Shapes;
 };
 
@@ -176,6 +177,17 @@ struct BOX3DASYNC_API FBox3DAsyncPose
 {
 	FBox3DAsyncBodyId BodyId = 0;
 	FTransform Transform = FTransform::Identity;
+	bool bAwake = true;
+};
+
+/** Latest completed worker publication for transport and diagnostics consumers. */
+struct BOX3DASYNC_API FBox3DAsyncPoseFrame
+{
+	FGuid World;
+	uint64 CaptureSerial = 0;
+	double CaptureMonotonicSeconds = 0.0;
+	FBox3DAsyncSampleStamp SimulationSample;
+	TArray<FBox3DAsyncPose> Poses;
 };
 
 struct BOX3DASYNC_API FBox3DAsyncTraceResult
@@ -330,6 +342,7 @@ class BOX3DASYNC_API UBox3DAsyncSubsystem : public UTickableWorldSubsystem
 	GENERATED_BODY()
 
 public:
+	UBox3DAsyncSubsystem();
 	static constexpr int32 CommandCapacity = 256;
 	static constexpr int32 OutstandingTraceCapacity = 64;
 	static constexpr int32 OutstandingCreationResultCapacity = 256;
@@ -400,9 +413,15 @@ public:
 	/** Copy authored UStaticMesh simple collision and queue one static body with multiple shapes. Boxes and convex hulls support nonuniform positive scale; meshes with spheres or capsules require uniform positive scale. */
 	bool TryCreateStaticMeshCollision(UStaticMesh* Mesh, const FTransform& Transform, const FVector& Scale,
 		FBox3DAsyncBodyId& OutBodyId);
+	/** Static authored mesh body with an explicit filter/event policy shared by all copied shapes. */
+	bool TryCreateStaticMeshCollision(UStaticMesh* Mesh, const FTransform& Transform, const FVector& Scale,
+		const FBox3DAsyncShapeOptions& Options, FBox3DAsyncBodyId& OutBodyId);
 	/** Queue a dynamic body using the mesh's authored simple collision. Round shapes require uniform positive scale. */
 	bool TryCreateDynamicMeshCollision(UStaticMesh* Mesh, const FTransform& Transform, const FVector& Scale,
 		const FVector& InitialVelocity, FBox3DAsyncBodyId& OutBodyId);
+	/** Dynamic authored mesh body with an explicit filter/event policy shared by all copied shapes. */
+	bool TryCreateDynamicMeshCollision(UStaticMesh* Mesh, const FTransform& Transform, const FVector& Scale,
+		const FVector& InitialVelocity, const FBox3DAsyncShapeOptions& Options, FBox3DAsyncBodyId& OutBodyId);
 	/** Queue a static instance of registered reusable geometry with positive scale components (minimum 1e-4). */
 	bool TryCreateStaticMeshInstance(FBox3DAsyncGeometryId GeometryId, const FTransform& Transform,
 		const FVector& Scale, FBox3DAsyncBodyId& OutBodyId);
@@ -450,6 +469,8 @@ public:
 
 	/** Sample interpolated dynamic poses at monotonic time minus two fixed steps. */
 	void SamplePoses(TArray<FBox3DAsyncPose>& OutPoses, double* OutSampleTimeSeconds = nullptr) const;
+	/** Copy the newest completed worker publication without rendering interpolation. */
+	bool TryGetLatestPoseFrame(FBox3DAsyncPoseFrame& OutFrame) const;
 	uint64 GetCompletedStepCount() const;
 	FBox3DAsyncDiagnostics GetDiagnostics() const;
 
@@ -462,7 +483,12 @@ private:
 	void PumpEventSubscriptions();
 	void CloseEventSubscriptions();
 	bool TryCreateAuthoredMeshCollision(UStaticMesh* Mesh, const FTransform& Transform, const FVector& Scale,
-		const FVector& InitialVelocity, bool bDynamic, FBox3DAsyncBodyId& OutBodyId);
+		const FVector& InitialVelocity, bool bDynamic, const FBox3DAsyncShapeOptions* Options,
+		FBox3DAsyncBodyId& OutBodyId);
 	struct FImpl;
-	TUniquePtr<FImpl> Impl;
+	struct FImplDeleter
+	{
+		void operator()(FImpl* Pointer) const;
+	};
+	TUniquePtr<FImpl, FImplDeleter> Impl;
 };

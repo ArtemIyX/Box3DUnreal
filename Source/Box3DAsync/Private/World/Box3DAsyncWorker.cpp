@@ -473,6 +473,7 @@ void UBox3DAsyncSubsystem::FImpl::FWorker::ApplyCommands()
 			BodyDef.position = Box3D::ToB3Pos(Command.Transform.GetLocation());
 			BodyDef.rotation = Box3D::ToB3(Command.Transform.GetRotation());
 			BodyDef.linearVelocity = Box3D::ToB3(Command.InitialVelocity);
+			BodyDef.gravityScale = Command.GravityScale;
 			BodyDef.userData = reinterpret_cast<void*>(static_cast<UPTRINT>(Command.BodyId));
 			const b3BodyId NativeBody = b3CreateBody(Owner.WorldId, &BodyDef);
 			bool bSucceeded = b3Body_IsValid(NativeBody);
@@ -534,6 +535,17 @@ void UBox3DAsyncSubsystem::FImpl::FWorker::ApplyCommands()
 			b3ShapeDef ShapeDef = b3DefaultShapeDef();
 			ShapeDef.filter.categoryBits = bDynamic ? DynamicCategory : StaticCategory;
 			ShapeDef.filter.maskBits = StaticCategory | DynamicCategory;
+			if (Command.bHasShapeOptions)
+			{
+				ShapeDef.filter.categoryBits = Command.ShapeOptions.CategoryBits;
+				ShapeDef.filter.maskBits = Command.ShapeOptions.MaskBits;
+				ShapeDef.isSensor = Command.ShapeOptions.bSensor;
+				ShapeDef.enableSensorEvents = Command.ShapeOptions.bSensor || Command.ShapeOptions.bDetectableBySensors;
+				ShapeDef.enableContactEvents = Command.ShapeOptions.bContactEvents;
+				ShapeDef.enableHitEvents = Command.ShapeOptions.bImpactEvents;
+				ShapeDef.density = Command.ShapeOptions.Density;
+				ShapeDef.baseMaterial.userMaterialId = Command.ShapeOptions.MaterialId;
+			}
 			for (const Box3DAsyncPrivate::FCopiedStaticShape& Shape : Command.StaticShapes)
 			{
 				b3ShapeId ShapeId{};
@@ -1261,6 +1273,12 @@ void UBox3DAsyncSubsystem::FImpl::FWorker::StepAndPublish(double ScheduledTime, 
 
 	FSnapshot Snapshot;
 	Snapshot.ScheduledTime = ScheduledTime;
+	Snapshot.CaptureMonotonicSeconds = FPlatformTime::Seconds();
+	{
+		FScopeLock Lock(&Owner.DiagnosticsMutex);
+		Snapshot.CaptureSerial = ++Owner.CaptureSerial;
+		Snapshot.SimulationSample = Owner.CompletedSample;
+	}
 	Snapshot.Poses.Reserve(Owner.WorkerBodies.Num());
 	for (const TPair<FBox3DAsyncBodyId, FBody>& Pair : Owner.WorkerBodies)
 	{
@@ -1273,6 +1291,7 @@ void UBox3DAsyncSubsystem::FImpl::FWorker::StepAndPublish(double ScheduledTime, 
 		Pose.BodyId = Pair.Key;
 		Pose.Transform = FTransform(Box3D::ToUE(NativeTransform.q), Box3D::ToUEPos(NativeTransform.p),
 		                            FVector::OneVector);
+		Pose.bAwake = b3Body_IsAwake(Pair.Value.NativeId);
 	}
 	Snapshot.Poses.Sort([](const FBox3DAsyncPose& A, const FBox3DAsyncPose& B)
 	{

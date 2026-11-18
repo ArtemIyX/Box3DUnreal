@@ -339,6 +339,13 @@ namespace Box3DAsyncPrivate
 	}
 }
 
+UBox3DAsyncSubsystem::UBox3DAsyncSubsystem() = default;
+
+void UBox3DAsyncSubsystem::FImplDeleter::operator()(FImpl* Pointer) const
+{
+	delete Pointer;
+}
+
 UBox3DAsyncSubsystem::~UBox3DAsyncSubsystem()
 {
 	check(IsInGameThread());
@@ -370,7 +377,7 @@ void UBox3DAsyncSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 {
 	check(IsInGameThread());
 	Super::Initialize(Collection);
-	Impl = MakeUnique<FImpl>();
+	Impl.Reset(new FImpl);
 	const UBox3DSettings* Settings = GetDefault<UBox3DSettings>();
 	if (Settings == nullptr || !FMath::IsFinite(Settings->FixedTimeStep)
 		|| Settings->FixedTimeStep < 0.001f || Settings->FixedTimeStep > 1.0f || !IsFiniteVector(Settings->Gravity))
@@ -755,19 +762,33 @@ bool UBox3DAsyncSubsystem::TryRegisterBakedMesh(const UBox3DCollisionData* Data,
 bool UBox3DAsyncSubsystem::TryCreateStaticMeshCollision(UStaticMesh* Mesh, const FTransform& Transform,
                                                         const FVector& Scale, FBox3DAsyncBodyId& OutBodyId)
 {
-	return TryCreateAuthoredMeshCollision(Mesh, Transform, Scale, FVector::ZeroVector, false, OutBodyId);
+	return TryCreateAuthoredMeshCollision(Mesh, Transform, Scale, FVector::ZeroVector, false, nullptr, OutBodyId);
+}
+
+bool UBox3DAsyncSubsystem::TryCreateStaticMeshCollision(UStaticMesh* Mesh, const FTransform& Transform,
+	const FVector& Scale, const FBox3DAsyncShapeOptions& Options, FBox3DAsyncBodyId& OutBodyId)
+{
+	return TryCreateAuthoredMeshCollision(Mesh, Transform, Scale, FVector::ZeroVector, false, &Options, OutBodyId);
 }
 
 bool UBox3DAsyncSubsystem::TryCreateDynamicMeshCollision(UStaticMesh* Mesh, const FTransform& Transform,
                                                          const FVector& Scale, const FVector& InitialVelocity,
                                                          FBox3DAsyncBodyId& OutBodyId)
 {
-	return TryCreateAuthoredMeshCollision(Mesh, Transform, Scale, InitialVelocity, true, OutBodyId);
+	return TryCreateAuthoredMeshCollision(Mesh, Transform, Scale, InitialVelocity, true, nullptr, OutBodyId);
+}
+
+bool UBox3DAsyncSubsystem::TryCreateDynamicMeshCollision(UStaticMesh* Mesh, const FTransform& Transform,
+	const FVector& Scale, const FVector& InitialVelocity, const FBox3DAsyncShapeOptions& Options,
+	FBox3DAsyncBodyId& OutBodyId)
+{
+	return TryCreateAuthoredMeshCollision(Mesh, Transform, Scale, InitialVelocity, true, &Options, OutBodyId);
 }
 
 bool UBox3DAsyncSubsystem::TryCreateAuthoredMeshCollision(UStaticMesh* Mesh, const FTransform& Transform,
                                                           const FVector& Scale, const FVector& InitialVelocity,
-                                                          bool bDynamic, FBox3DAsyncBodyId& OutBodyId)
+																	  bool bDynamic, const FBox3DAsyncShapeOptions* Options,
+																	  FBox3DAsyncBodyId& OutBodyId)
 {
 	check(IsInGameThread());
 	OutBodyId = 0;
@@ -788,6 +809,12 @@ bool UBox3DAsyncSubsystem::TryCreateAuthoredMeshCollision(UStaticMesh* Mesh, con
 	Command.Transform = Transform;
 	Command.Scale = Scale;
 	Command.InitialVelocity = InitialVelocity;
+	if (Options != nullptr)
+	{
+		if (!FMath::IsFinite(Options->Density) || Options->Density < 0.0f) return false;
+		Command.ShapeOptions = *Options;
+		Command.bHasShapeOptions = true;
+	}
 	FVector BoundsMin;
 	FVector BoundsMax;
 	uint64 PayloadBytes = 0;
@@ -1414,6 +1441,25 @@ void UBox3DAsyncSubsystem::SamplePoses(TArray<FBox3DAsyncPose>& OutPoses, double
 			OutPoses.Add(After->Poses[LaterIndex]);
 		}
 	}
+}
+
+bool UBox3DAsyncSubsystem::TryGetLatestPoseFrame(FBox3DAsyncPoseFrame& OutFrame) const
+{
+	check(IsInGameThread());
+	OutFrame = FBox3DAsyncPoseFrame();
+	if (!Impl.IsValid()) return false;
+	TSharedPtr<const FImpl::FSnapshot, ESPMode::ThreadSafe> LatestSnapshot;
+	{
+		FScopeLock Lock(&Impl->SnapshotMutex);
+		if (!Impl->Snapshots.IsEmpty()) LatestSnapshot = Impl->Snapshots.Last();
+	}
+	if (!LatestSnapshot.IsValid()) return false;
+	OutFrame.World = Impl->QueryWorld;
+	OutFrame.CaptureSerial = LatestSnapshot->CaptureSerial;
+	OutFrame.CaptureMonotonicSeconds = LatestSnapshot->CaptureMonotonicSeconds;
+	OutFrame.SimulationSample = LatestSnapshot->SimulationSample;
+	OutFrame.Poses = LatestSnapshot->Poses;
+	return true;
 }
 
 uint64 UBox3DAsyncSubsystem::GetCompletedStepCount() const
