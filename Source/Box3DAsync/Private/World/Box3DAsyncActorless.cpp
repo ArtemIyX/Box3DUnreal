@@ -19,17 +19,27 @@ namespace
 
 	bool CopyBodyShapes(const FBox3DAsyncBodyDesc& Desc, TArray<Box3DAsyncPrivate::FCopiedBodyShape>& Out, uint64& Bytes)
 	{
-		if (!ValidTransform(Desc.Transform) || !ValidPoint(Desc.InitialVelocity)
-			|| (Desc.Motion != EBox3DAsyncBodyMotion::Static && Desc.Motion != EBox3DAsyncBodyMotion::Dynamic)
+		if (!ValidTransform(Desc.Transform) || !ValidPoint(Desc.InitialVelocity) || !ValidPoint(Desc.InitialAngularVelocity) || !FMath::IsFinite(Desc.GravityScale)
+			|| !FMath::IsFinite(Desc.LinearDamping) || Desc.LinearDamping < 0.0f
+			|| !FMath::IsFinite(Desc.AngularDamping) || Desc.AngularDamping < 0.0f
+			|| !FMath::IsFinite(Desc.MassOverride) || Desc.MassOverride < 0.0f || Desc.MassOverride > 1.0e7f
+			|| (Desc.bStartEnabled && !Desc.bStartAwake
+				&& (!Desc.InitialVelocity.IsZero() || !Desc.InitialAngularVelocity.IsZero()))
+			|| (Desc.Motion != EBox3DAsyncBodyMotion::Static && Desc.Motion != EBox3DAsyncBodyMotion::Dynamic
+				&& Desc.Motion != EBox3DAsyncBodyMotion::Kinematic)
 			|| Desc.Shapes.IsEmpty() || Desc.Shapes.Num() > 256) return false;
 		Bytes = 0;
 		Out.Reserve(Desc.Shapes.Num());
 		for (const FBox3DAsyncBodyShapeDesc& Input : Desc.Shapes)
 		{
 			if (!ValidTransform(Input.LocalTransform) || !FMath::IsFinite(Input.Options.Density)
-				|| Input.Options.Density < 0 || Input.ConvexPoints.Num() > 64) return false;
+				|| Input.Options.Density < 0 || !FMath::IsFinite(Input.Friction) || Input.Friction < 0
+				|| !FMath::IsFinite(Input.Restitution) || Input.Restitution < 0
+				|| Input.ConvexPoints.Num() > 64) return false;
 			Box3DAsyncPrivate::FCopiedBodyShape Shape;
 			Shape.Options = Input.Options;
+			Shape.Friction = Input.Friction;
+			Shape.Restitution = Input.Restitution;
 			Shape.SubshapeKey = Input.SubshapeKey;
 			const FVector Center = Input.LocalTransform.GetLocation();
 			auto ValidWorldPoint = [&Desc](const FVector& P, double Radius)
@@ -121,14 +131,24 @@ bool UBox3DAsyncSubsystem::TryCreateBody(FBox3DAsyncCreationConsumer Consumer, c
 	uint64 PayloadBytes = 0;
 	if (!CopyBodyShapes(Desc, Command.BodyShapes, PayloadBytes)) return false;
 	Command.Type = FImpl::ECommandType::CreateActorlessBody;
-	Command.bDynamic = Desc.Motion == EBox3DAsyncBodyMotion::Dynamic;
+	Command.bDynamic = Desc.Motion != EBox3DAsyncBodyMotion::Static;
+	Command.bKinematic = Desc.Motion == EBox3DAsyncBodyMotion::Kinematic;
 	Command.Transform = Desc.Transform;
 	Command.InitialVelocity = Desc.InitialVelocity;
+	Command.InitialAngularVelocity = Desc.InitialAngularVelocity;
+	Command.LinearDamping = Desc.LinearDamping;
+	Command.AngularDamping = Desc.AngularDamping;
+	Command.MassOverride = Desc.MassOverride;
+	Command.bEnableSleep = Desc.bEnableSleep;
+	Command.bStartAwake = Desc.bStartAwake;
+	Command.bStartEnabled = Desc.bStartEnabled;
+	Command.bBullet = Desc.bBullet;
+	Command.GravityScale = Desc.GravityScale;
 	Command.PayloadBytes = PayloadBytes;
 	Command.ReservedShapeIdentities = Command.BodyShapes.Num();
 	FScopeLock Lock(&Impl->QueueMutex);
 	const auto* Results = Impl->OwnedCreationResults.Find(Consumer.Id);
-	if (!Impl->bAccepting || !Results || Impl->Commands.Num() >= CommandCapacity || Impl->NextBodyId == 0
+	if (!Impl->bAccepting || !Results || Impl->Commands.Num() >= Impl->CommandQueueCapacity || Impl->NextBodyId == 0
 		|| Impl->OutstandingCreationResults >= OutstandingCreationResultCapacity
 		|| Command.ReservedShapeIdentities > 8192 - Impl->LiveShapeIdentities - Impl->ReservedShapeIdentities
 		|| PayloadBytes > MaxMeshGeometryBytes - Impl->ReservedStaticShapeBytes) return false;

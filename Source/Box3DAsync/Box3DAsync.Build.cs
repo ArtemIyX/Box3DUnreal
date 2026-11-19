@@ -12,6 +12,7 @@ public class Box3DAsync : ModuleRules
                 "Core",
                 "CoreUObject",
                 "Engine",
+                "DeveloperSettings",
             }
         );
 

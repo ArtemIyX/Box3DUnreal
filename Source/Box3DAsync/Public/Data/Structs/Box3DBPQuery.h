@@ -40,6 +40,9 @@ struct BOX3DASYNC_API FBox3DBPQuery
 	bool bStatic = true;
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Box3D")
 	bool bDynamic = true;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Box3D|Async")
+	bool bKinematic = true;
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Box3D")
 	bool bSensors = false;
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Box3D")

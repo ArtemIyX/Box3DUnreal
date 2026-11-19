@@ -39,6 +39,11 @@
       "Name": "Box3DEditor",
       "Type": "Editor",
       "LoadingPhase": "Default"
+    },
+    {
+      "Name": "Box3DReplication",
+      "Type": "Runtime",
+      "LoadingPhase": "Default"
     }
   ],
   "Plugins": [

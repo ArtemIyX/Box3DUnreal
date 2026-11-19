@@ -25,6 +25,7 @@ Start by dropping a group of shapes onto a platform you can see in the editor. E
 - **Bodies and joints** let you build moving props and connect them with constraints such as hinges or springs.
 - **Blueprint queries** let you cast a ray or a shape through the Box3D world, or check which bodies overlap a volume.
 - **Destruction** lets you fracture a mesh into pieces and simulate how those pieces break apart. See the [destruction guide](docs/DESTRUCTION.md).
+- **Iris replication** sends authoritative async Box3D body poses to clients for presentation. See the [replication guide](Source/Box3DReplication/README.md).
 
 ## Quick start
 
@@ -72,12 +73,15 @@ Open your `.uproject` file with Unreal Engine 5.7. If Unreal prompts you to rebu
 | --- | --- |
 | [Box3DCore](Source/Box3DCore/) | The bundled Box3D engine. |
 | [Box3DRuntime](Source/Box3DRuntime/) | Unreal-facing bodies, joints, queries, and simulation settings. |
+| [Box3DAsync](Source/Box3DAsync/) | Worker-backed physics, asynchronous queries, events, and body controls. |
+| [Box3DReplication](Source/Box3DReplication/README.md) | Iris transport and presentation for shared async dynamic bodies. |
 | [Box3DEditor](Source/Box3DEditor/) | Tools for baking level collision ahead of time. |
 | [Box3DTests](Source/Box3DTests/) | Unreal automation tests for the integration. |
 
 - **Run the tests.** Enter `Automation RunTests Box3DUnreal` in Unreal's console. See the [testing guide](docs/TESTING.md).
 - **Prepare level collision for packaged builds.** See the [baked collision guide](docs/BAKED_COLLISION.md).
 - **Try fracture, debris, and deformation.** See the [destruction guide](docs/DESTRUCTION.md).
+- **Configure shared async bodies with Iris.** See the [replication guide](Source/Box3DReplication/README.md) for setup, the data flow, and current limits.
 - **Explore snapshots, prediction, and rollback.** See the [networking guide](docs/NETWORKING.md).
 - **See how the integration works or contribute.** Read the [design notes](docs/DESIGN.md) and the [contributing guide](CONTRIBUTING.md).
 

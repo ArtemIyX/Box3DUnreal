@@ -1,6 +1,7 @@
 #include "Blueprint/Box3DAsyncBlueprint.h"
 
 #include "Engine/Engine.h"
+#include "Containers/Ticker.h"
 #include "Engine/World.h"
 
 namespace
@@ -38,7 +39,7 @@ namespace
 		Result.Radius = Source.Radius; Result.HalfHeight = Source.HalfHeight;
 		Result.HalfExtents = Source.HalfExtents; Result.ConvexPoints = Source.ConvexPoints;
 		Result.CategoryBits = UnsignedBits(Source.CategoryBits); Result.MaskBits = UnsignedBits(Source.MaskBits);
-		Result.bStatic = Source.bStatic; Result.bDynamic = Source.bDynamic;
+		Result.bStatic = Source.bStatic; Result.bDynamic = Source.bDynamic; Result.bKinematic = Source.bKinematic;
 		Result.bSensors = Source.bSensors; Result.bSolids = Source.bSolids;
 		Result.MaxHits = Source.MaxHits; Result.UserTag = UnsignedBits(Source.UserTag);
 		for (const FBox3DBPIdentity& Ignored : Source.IgnoredBodies)
@@ -196,4 +197,309 @@ UBox3DBPEventSubscription* UBox3DBPAsyncLibrary::SubscribeBox3DAsyncEvents(UObje
 	if (!Subsystem || !IsValid(Owner)) return nullptr;
 	UBox3DBPEventSubscription* Subscription = NewObject<UBox3DBPEventSubscription>();
 	return Subscription->Start(Subsystem, Owner, Filter) ? Subscription : nullptr;
+}
+
+bool UBox3DBPAsyncLibrary::SubmitBodyCommand(UObject* WorldContextObject, const FBox3DBPIdentity& Body,
+	const FBox3DBPBodyCommand& Command)
+{
+	UBox3DAsyncSubsystem* Subsystem = ResolveAsync(WorldContextObject);
+	if (!Subsystem) return false;
+	FBox3DAsyncBodyCommand Native;
+	Native.Type = Command.Type;
+	Native.Value = Command.Value;
+	Native.Point = Command.Point;
+	Native.Target = Command.Target;
+	Native.TargetDuration = Command.TargetDuration;
+	Native.bWake = Command.bWake;
+	Native.bEnabled = Command.bEnabled;
+	return Subsystem->TrySubmitBodyCommand({Body.World, UnsignedBits(Body.Id)}, Native);
+}
+
+bool UBox3DBPAsyncLibrary::GetLatestBodyState(UObject* WorldContextObject, const FBox3DBPIdentity& Body,
+	FBox3DBPBodyState& OutState)
+{
+	OutState = {};
+	UBox3DAsyncSubsystem* Subsystem = ResolveAsync(WorldContextObject);
+	FBox3DAsyncBodyState State;
+	if (!Subsystem || !Subsystem->TryGetLatestBodyState({Body.World, UnsignedBits(Body.Id)}, State)) return false;
+	OutState.Body = Identity(State.World, State.BodyId);
+	OutState.CaptureSerial = SignedBits(State.CaptureSerial);
+	OutState.SimulationStep = SignedBits(State.SimulationStep);
+	OutState.CaptureMonotonicSeconds = State.CaptureMonotonicSeconds;
+	OutState.Transform = State.Transform;
+	OutState.LinearVelocity = State.LinearVelocity;
+	OutState.AngularVelocity = State.AngularVelocity;
+	OutState.Mass = State.Mass;
+	OutState.bAwake = State.bAwake;
+	OutState.bEnabled = State.bEnabled;
+	return true;
+}
+
+namespace
+{
+	FBox3DAsyncFieldDesc FieldDesc(const FBox3DBPFieldDesc& In)
+	{
+		FBox3DAsyncFieldDesc Out;
+		Out.Mode = In.Mode;
+		Out.Center = In.Center;
+		Out.Radius = In.Radius;
+		Out.Vector = In.Vector;
+		Out.WindDrag = In.WindDrag;
+		Out.FalloffExponent = In.FalloffExponent;
+		Out.bWakeBodies = In.bWakeBodies;
+		return Out;
+	}
+}
+
+bool UBox3DBPAsyncLibrary::CreateField(UObject* WorldContextObject, const FBox3DBPFieldDesc& Desc, FBox3DBPIdentity& OutField)
+{
+	OutField = {};
+	UBox3DAsyncSubsystem* Subsystem = ResolveAsync(WorldContextObject);
+	FBox3DAsyncFieldHandle Field;
+	if (!Subsystem || !Subsystem->TryCreateField(FieldDesc(Desc), Field)) return false;
+	OutField = Identity(Field.World, Field.Id);
+	return true;
+}
+
+bool UBox3DBPAsyncLibrary::UpdateField(UObject* WorldContextObject, const FBox3DBPIdentity& Field, const FBox3DBPFieldDesc& Desc)
+{
+	UBox3DAsyncSubsystem* Subsystem = ResolveAsync(WorldContextObject);
+	return Subsystem && Subsystem->TryUpdateField({Field.World, UnsignedBits(Field.Id)}, FieldDesc(Desc));
+}
+
+bool UBox3DBPAsyncLibrary::RemoveField(UObject* WorldContextObject, const FBox3DBPIdentity& Field)
+{
+	UBox3DAsyncSubsystem* Subsystem = ResolveAsync(WorldContextObject);
+	return Subsystem && Subsystem->TryRemoveField({Field.World, UnsignedBits(Field.Id)});
+}
+
+namespace
+{
+	FBox3DAsyncJointDesc MakeAsyncJointDesc(const FBox3DBPJointDesc& Desc)
+	{
+		FBox3DAsyncJointDesc Native;
+		Native.BodyA = {Desc.BodyA.World, UnsignedBits(Desc.BodyA.Id)};
+		Native.BodyB = {Desc.BodyB.World, UnsignedBits(Desc.BodyB.Id)};
+		Native.Type = Desc.Type;
+		Native.LocalFrameA = Desc.LocalFrameA;
+		Native.LocalFrameB = Desc.LocalFrameB;
+		Native.bCollideConnected = Desc.bCollideConnected;
+		Native.BreakForce = Desc.BreakForce;
+		Native.BreakTorque = Desc.BreakTorque;
+		Native.ConstraintHertz = Desc.ConstraintHertz;
+		Native.ConstraintDampingRatio = Desc.ConstraintDampingRatio;
+		Native.bEnableSpring = Desc.bEnableSpring;
+		Native.SpringHertz = Desc.SpringHertz;
+		Native.SpringDampingRatio = Desc.SpringDampingRatio;
+		Native.bEnableLimit = Desc.bEnableLimit;
+		Native.LowerLimit = Desc.LowerLimit;
+		Native.UpperLimit = Desc.UpperLimit;
+		Native.bEnableMotor = Desc.bEnableMotor;
+		Native.MotorSpeed = Desc.MotorSpeed;
+		Native.MaxMotorForce = Desc.MaxMotorForce;
+		Native.MaxMotorTorque = Desc.MaxMotorTorque;
+		Native.DistanceLength = Desc.DistanceLength;
+		Native.Target = Desc.Target;
+		Native.AngularHertz = Desc.AngularHertz;
+		Native.AngularDampingRatio = Desc.AngularDampingRatio;
+		Native.LinearMotorVelocity = Desc.LinearMotorVelocity;
+		Native.AngularMotorVelocity = Desc.AngularMotorVelocity;
+		Native.MaxSpringForce = Desc.MaxSpringForce;
+		Native.MaxSpringTorque = Desc.MaxSpringTorque;
+		Native.TargetRotation = Desc.TargetRotation.Quaternion();
+		Native.bEnableSteering = Desc.bEnableSteering;
+		Native.SteeringHertz = Desc.SteeringHertz;
+		Native.SteeringDampingRatio = Desc.SteeringDampingRatio;
+		Native.TargetSteeringAngle = Desc.TargetSteeringAngle;
+		Native.MaxSteeringTorque = Desc.MaxSteeringTorque;
+		Native.bEnableSteeringLimit = Desc.bEnableSteeringLimit;
+		Native.LowerSteeringLimit = Desc.LowerSteeringLimit;
+		Native.UpperSteeringLimit = Desc.UpperSteeringLimit;
+		Native.bEnableConeLimit = Desc.bEnableConeLimit;
+		Native.ConeAngle = Desc.ConeAngle;
+		Native.bEnableTwistLimit = Desc.bEnableTwistLimit;
+		Native.LowerTwist = Desc.LowerTwist;
+		Native.UpperTwist = Desc.UpperTwist;
+		return Native;
+	}
+}
+
+bool UBox3DBPAsyncLibrary::CreateJoint(UObject* WorldContextObject, const FBox3DBPJointDesc& Desc, FBox3DBPIdentity& OutJoint)
+{
+	OutJoint = {};
+	UBox3DAsyncSubsystem* Subsystem = ResolveAsync(WorldContextObject);
+	if (!Subsystem) return false;
+	FBox3DAsyncJointDesc Native = MakeAsyncJointDesc(Desc);
+	FBox3DAsyncJointHandle Joint;
+	if (!Subsystem->TryCreateJoint(Native, Joint)) return false;
+	OutJoint = Identity(Joint.World, Joint.Id);
+	return true;
+}
+
+EBox3DAsyncJointStatus UBox3DBPAsyncLibrary::GetJointStatus(UObject* WorldContextObject, const FBox3DBPIdentity& Joint)
+{
+	UBox3DAsyncSubsystem* Subsystem = ResolveAsync(WorldContextObject);
+	return Subsystem ? Subsystem->GetJointStatus({Joint.World, UnsignedBits(Joint.Id)}) : EBox3DAsyncJointStatus::Unavailable;
+}
+
+bool UBox3DBPAsyncLibrary::UpdateJoint(UObject* WorldContextObject, const FBox3DBPIdentity& Joint, const FBox3DBPJointDesc& Settings)
+{
+	UBox3DAsyncSubsystem* Subsystem = ResolveAsync(WorldContextObject);
+	return Subsystem && Subsystem->TryUpdateJoint({Joint.World, UnsignedBits(Joint.Id)}, MakeAsyncJointDesc(Settings));
+}
+
+bool UBox3DBPAsyncLibrary::RemoveJoint(UObject* WorldContextObject, const FBox3DBPIdentity& Joint)
+{
+	UBox3DAsyncSubsystem* Subsystem = ResolveAsync(WorldContextObject);
+	return Subsystem && Subsystem->TryRemoveJoint({Joint.World, UnsignedBits(Joint.Id)});
+}
+
+bool UBox3DBPAsyncLibrary::SubmitJointCommand(UObject* WorldContextObject, const FBox3DBPIdentity& Joint, const FBox3DAsyncJointCommand& Command)
+{
+	UBox3DAsyncSubsystem* Subsystem = ResolveAsync(WorldContextObject);
+	return Subsystem && Subsystem->TrySubmitJointCommand({Joint.World, UnsignedBits(Joint.Id)}, Command);
+}
+
+bool UBox3DBPAsyncLibrary::GetLatestJointState(UObject* WorldContextObject, const FBox3DBPIdentity& Joint, FBox3DBPJointState& OutState)
+{
+	OutState = {};
+	UBox3DAsyncSubsystem* Subsystem = ResolveAsync(WorldContextObject);
+	FBox3DAsyncJointState State;
+	if (!Subsystem || !Subsystem->TryGetLatestJointState({Joint.World, UnsignedBits(Joint.Id)}, State)) return false;
+	OutState.Joint = Identity(State.World, State.JointId);
+	OutState.CaptureSerial = SignedBits(State.CaptureSerial);
+	OutState.SimulationStep = SignedBits(State.SimulationStep);
+	OutState.ConstraintForce = State.ConstraintForce;
+	OutState.ConstraintTorque = State.ConstraintTorque;
+	return true;
+}
+
+namespace
+{
+	FBox3DAsyncBodyDesc BodyDesc(const FBox3DBPBodyDesc& Source)
+	{
+		FBox3DAsyncBodyDesc Result;
+		Result.Motion = Source.Motion;
+		Result.Transform = Source.Transform;
+		Result.InitialVelocity = Source.InitialVelocity;
+		Result.InitialAngularVelocity = Source.InitialAngularVelocity;
+		Result.GravityScale = Source.GravityScale;
+		Result.LinearDamping = Source.LinearDamping;
+		Result.AngularDamping = Source.AngularDamping;
+		Result.MassOverride = Source.MassOverride;
+		Result.bEnableSleep = Source.bEnableSleep;
+		Result.bStartAwake = Source.bStartAwake;
+		Result.bStartEnabled = Source.bStartEnabled;
+		Result.bBullet = Source.bBullet;
+		Result.Shapes.Reserve(Source.Shapes.Num());
+		for (const FBox3DBPBodyShape& Shape : Source.Shapes)
+		{
+			FBox3DAsyncBodyShapeDesc& Out = Result.Shapes.AddDefaulted_GetRef();
+			Out.Kind = Shape.Kind; Out.LocalTransform = Shape.LocalTransform;
+			Out.HalfExtents = Shape.HalfExtents; Out.Radius = Shape.Radius; Out.HalfHeight = Shape.HalfHeight;
+			Out.ConvexPoints = Shape.ConvexPoints; Out.Friction = Shape.Friction; Out.Restitution = Shape.Restitution;
+			Out.Options.bSensor = Shape.bSensor; Out.Options.bDetectableBySensors = Shape.bDetectableBySensors;
+			Out.Options.bContactEvents = Shape.bContactEvents; Out.Options.bImpactEvents = Shape.bImpactEvents;
+			Out.Options.CategoryBits = UnsignedBits(Shape.CategoryBits); Out.Options.MaskBits = UnsignedBits(Shape.MaskBits);
+			Out.Options.GroupIndex = Shape.GroupIndex; Out.Options.Density = Shape.Density;
+			Out.Options.MaterialId = UnsignedBits(Shape.MaterialId); Out.SubshapeKey = UnsignedBits(Shape.SubshapeKey);
+		}
+		return Result;
+	}
+}
+
+UBox3DBPCreateBody* UBox3DBPCreateBody::CreateBox3DAsyncBody(UObject* WorldContextObject, UObject* Owner, const FBox3DBPBodyDesc& Desc)
+{
+	UBox3DBPCreateBody* Action = NewObject<UBox3DBPCreateBody>();
+	Action->WeakOwner = Owner;
+	Action->Input = Desc;
+	Action->Physics = ResolveAsync(WorldContextObject);
+	if (UBox3DAsyncSubsystem* Subsystem = Action->Physics.Get()) Action->WeakWorld = Subsystem->GetWorld();
+	if (IsValid(WorldContextObject)) Action->RegisterWithGameInstance(WorldContextObject);
+	return Action;
+}
+
+void UBox3DBPCreateBody::Activate()
+{
+	UBox3DAsyncSubsystem* Subsystem = Physics.Get();
+	if (!Subsystem || !WeakWorld.IsValid() || !WeakWorld->GetGameInstance() || !WeakOwner.IsValid()
+		|| !Subsystem->TryRegisterCreationConsumer(Consumer)
+		|| !Subsystem->TryCreateBody(Consumer, BodyDesc(Input), Body))
+	{
+		Finish(false);
+		return;
+	}
+	Ticker = FTSTicker::GetCoreTicker().AddTicker(FTickerDelegate::CreateUObject(this, &UBox3DBPCreateBody::Poll));
+}
+
+void UBox3DBPCreateBody::Cancel()
+{
+	bCancel = true;
+}
+
+bool UBox3DBPCreateBody::Poll(float DeltaTime)
+{
+	UBox3DAsyncSubsystem* Subsystem = Physics.Get();
+	UWorld* World = WeakWorld.Get();
+	if (!Subsystem || !World || World->bIsTearingDown) { Finish(false); return false; }
+	if (!bHaveResult)
+	{
+		if (Subsystem->TryTakeCreationResult(Consumer, Body, CreationResult))
+		{
+			bHaveResult = true;
+			bSucceeded = CreationResult.bSucceeded;
+		}
+	}
+	if (bCancel || !WeakOwner.IsValid())
+	{
+		// A queued removal after pending creation is ordered on the same worker queue.
+		if ((!bHaveResult || bSucceeded) && !Subsystem->TryRemoveBody(Body)) return true;
+		Finish(false);
+		return false;
+	}
+	if (bHaveResult) { Finish(bSucceeded); return false; }
+	return true;
+}
+
+void UBox3DBPCreateBody::Finish(bool bSuccess)
+{
+	if (UBox3DAsyncSubsystem* Subsystem = Physics.Get()) Subsystem->UnregisterCreationConsumer(Consumer);
+	Consumer = {};
+	Ticker.Reset(); // Poll returns false, so the ticker removes its delegate.
+	if (WeakOwner.IsValid() && !bCancel)
+	{
+		FBox3DBPBodyCreationResult Output;
+		Output.bSucceeded = bSuccess;
+		if (bSuccess)
+		{
+			Output.Body = Identity(Body.World, Body.Id);
+			for (const FBox3DAsyncShapeHandle& Shape : CreationResult.ShapeHandles)
+				Output.Shapes.Add(Identity(Shape.World, Shape.Id));
+			for (uint64 Key : CreationResult.SubshapeKeys) Output.SubshapeKeys.Add(SignedBits(Key));
+		}
+		Completed.Broadcast(Output);
+	}
+	SetReadyToDestroy();
+}
+
+bool UBox3DBPAsyncLibrary::RemoveBody(UObject* WorldContextObject, const FBox3DBPIdentity& Body)
+{
+	UBox3DAsyncSubsystem* Subsystem = ResolveAsync(WorldContextObject);
+	return Subsystem && Subsystem->TryRemoveBody({Body.World, UnsignedBits(Body.Id)});
+}
+
+void UBox3DBPAsyncLibrary::DrainJointBreakEvents(UObject* WorldContextObject, TArray<FBox3DBPJointBreakEvent>& OutEvents, bool& bGap)
+{
+	OutEvents.Reset();
+	bGap = true;
+	UBox3DAsyncSubsystem* Subsystem = ResolveAsync(WorldContextObject);
+	if (!Subsystem) return;
+	TArray<FBox3DAsyncJointBreakEvent> Events;
+	Subsystem->DrainJointBreakEvents(Events, bGap);
+	for (const FBox3DAsyncJointBreakEvent& Event : Events)
+	{
+		FBox3DBPJointBreakEvent& Output = OutEvents.AddDefaulted_GetRef();
+		Output.Joint = Identity(Event.Joint.World, Event.Joint.Id);
+		Output.SimulationStep = SignedBits(Event.SimulationStep);
+	}
 }

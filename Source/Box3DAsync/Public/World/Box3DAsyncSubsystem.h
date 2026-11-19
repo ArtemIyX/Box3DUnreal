@@ -2,6 +2,19 @@
 
 #include "CoreMinimal.h"
 #include "Subsystems/WorldSubsystem.h"
+#include "Data/Structs/Box3DAsyncBodyHandle.h"
+#include "Data/Structs/Box3DAsyncBodyCommand.h"
+#include "Data/Structs/Box3DAsyncBodyState.h"
+#include "Data/Structs/Box3DAsyncFieldDesc.h"
+#include "Data/Structs/Box3DAsyncFieldHandle.h"
+#include "Data/Structs/Box3DAsyncJointDesc.h"
+#include "Data/Structs/Box3DAsyncJointHandle.h"
+#include "Data/Structs/Box3DAsyncJointState.h"
+#include "Data/Structs/Box3DAsyncJointCommand.h"
+#include "Data/Structs/Box3DAsyncJointBreakEvent.h"
+#include "Data/Enums/Box3DAsyncJointStatus.h"
+#include "Data/Enums/Box3DAsyncBodyMotion.h"
+#include "Data/Enums/Box3DAsyncBodyShapeKind.h"
 #include "Box3DAsyncSubsystem.generated.h"
 
 /** World-local handle. Zero is invalid; IDs are never reused during subsystem lifetime. */
@@ -10,13 +23,7 @@ using FBox3DAsyncTraceRequestId = uint64;
 using FBox3DAsyncGeometryId = uint64;
 using FBox3DAsyncShapeId = uint64;
 
-/** Generation-safe public identities. Bare IDs below remain subsystem-local compatibility values. */
-struct BOX3DASYNC_API FBox3DAsyncBodyHandle
-{
-	FGuid World;
-	FBox3DAsyncBodyId Id = 0;
-};
-
+/** Generation-safe public shape identity. */
 struct BOX3DASYNC_API FBox3DAsyncShapeHandle
 {
 	FGuid World;
@@ -48,12 +55,12 @@ struct BOX3DASYNC_API FBox3DAsyncShapeOptions
 	bool bImpactEvents = false;
 	uint64 CategoryBits = MAX_uint64;
 	uint64 MaskBits = MAX_uint64;
+	/** Equal negative group values suppress collision within a group. */
+	int32 GroupIndex = 0;
 	float Density = 1.0f;
 	uint64 MaterialId = 0;
 };
 
-enum class EBox3DAsyncBodyMotion : uint8 { Static, Dynamic };
-enum class EBox3DAsyncBodyShapeKind : uint8 { Sphere, Capsule, Box, Convex };
 
 /** Local geometry in centimeters. LocalTransform must have unit scale and a normalized rotation.
  * Capsule HalfHeight includes the hemispheres; convex points are local to LocalTransform. */
@@ -66,6 +73,8 @@ struct BOX3DASYNC_API FBox3DAsyncBodyShapeDesc
 	float HalfHeight = 50.0f;
 	TArray<FVector> ConvexPoints;
 	FBox3DAsyncShapeOptions Options;
+	float Friction = 0.6f;
+	float Restitution = 0.0f;
 	uint64 SubshapeKey = 0;
 };
 
@@ -75,6 +84,16 @@ struct BOX3DASYNC_API FBox3DAsyncBodyDesc
 	EBox3DAsyncBodyMotion Motion = EBox3DAsyncBodyMotion::Static;
 	FTransform Transform = FTransform::Identity;
 	FVector InitialVelocity = FVector::ZeroVector;
+	FVector InitialAngularVelocity = FVector::ZeroVector;
+	float GravityScale = 1.0f;
+	float LinearDamping = 0.0f;
+	float AngularDamping = 0.0f;
+	/** Positive mass overrides shape-derived mass while preserving inertia proportions. */
+	float MassOverride = 0.0f;
+	bool bEnableSleep = true;
+	bool bStartAwake = true;
+	bool bStartEnabled = true;
+	bool bBullet = false;
 	TArray<FBox3DAsyncBodyShapeDesc> Shapes;
 };
 
@@ -176,6 +195,17 @@ struct BOX3DASYNC_API FBox3DAsyncPose
 {
 	FBox3DAsyncBodyId BodyId = 0;
 	FTransform Transform = FTransform::Identity;
+	bool bAwake = true;
+};
+
+/** Latest completed worker publication for transport and diagnostics consumers. */
+struct BOX3DASYNC_API FBox3DAsyncPoseFrame
+{
+	FGuid World;
+	uint64 CaptureSerial = 0;
+	double CaptureMonotonicSeconds = 0.0;
+	FBox3DAsyncSampleStamp SimulationSample;
+	TArray<FBox3DAsyncPose> Poses;
 };
 
 struct BOX3DASYNC_API FBox3DAsyncTraceResult
@@ -232,6 +262,7 @@ struct BOX3DASYNC_API FBox3DAsyncLineQuery
 	uint64 MaskBits = MAX_uint64;
 	bool bStatic = true;
 	bool bDynamic = true;
+	bool bKinematic = true;
 	bool bSensors = false;
 	bool bSolids = true;
 	int32 MaxHits = 1;
@@ -330,6 +361,7 @@ class BOX3DASYNC_API UBox3DAsyncSubsystem : public UTickableWorldSubsystem
 	GENERATED_BODY()
 
 public:
+	UBox3DAsyncSubsystem();
 	static constexpr int32 CommandCapacity = 256;
 	static constexpr int32 OutstandingTraceCapacity = 64;
 	static constexpr int32 OutstandingCreationResultCapacity = 256;
@@ -400,9 +432,15 @@ public:
 	/** Copy authored UStaticMesh simple collision and queue one static body with multiple shapes. Boxes and convex hulls support nonuniform positive scale; meshes with spheres or capsules require uniform positive scale. */
 	bool TryCreateStaticMeshCollision(UStaticMesh* Mesh, const FTransform& Transform, const FVector& Scale,
 		FBox3DAsyncBodyId& OutBodyId);
+	/** Static authored mesh body with an explicit filter/event policy shared by all copied shapes. */
+	bool TryCreateStaticMeshCollision(UStaticMesh* Mesh, const FTransform& Transform, const FVector& Scale,
+		const FBox3DAsyncShapeOptions& Options, FBox3DAsyncBodyId& OutBodyId);
 	/** Queue a dynamic body using the mesh's authored simple collision. Round shapes require uniform positive scale. */
 	bool TryCreateDynamicMeshCollision(UStaticMesh* Mesh, const FTransform& Transform, const FVector& Scale,
 		const FVector& InitialVelocity, FBox3DAsyncBodyId& OutBodyId);
+	/** Dynamic authored mesh body with an explicit filter/event policy shared by all copied shapes. */
+	bool TryCreateDynamicMeshCollision(UStaticMesh* Mesh, const FTransform& Transform, const FVector& Scale,
+		const FVector& InitialVelocity, const FBox3DAsyncShapeOptions& Options, FBox3DAsyncBodyId& OutBodyId);
 	/** Queue a static instance of registered reusable geometry with positive scale components (minimum 1e-4). */
 	bool TryCreateStaticMeshInstance(FBox3DAsyncGeometryId GeometryId, const FTransform& Transform,
 		const FVector& Scale, FBox3DAsyncBodyId& OutBodyId);
@@ -411,6 +449,34 @@ public:
 	/** Queue removal of a previously accepted body ID. */
 	bool TryRemoveBody(FBox3DAsyncBodyId BodyId);
 	bool TryRemoveBody(FBox3DAsyncBodyHandle Body);
+
+	/** Enqueue a copied body command. True means accepted, not that native execution succeeded.
+	 * Commands are ordered with body creation/removal; a failed create makes later commands no-ops.
+	 * Force and torque commands affect one real worker step. The caller must retry capacity failures. */
+	bool TrySubmitBodyCommand(FBox3DAsyncBodyHandle Body, const FBox3DAsyncBodyCommand& Command);
+	/** Atomically enable or disable a bounded set at a worker step boundary. */
+	bool TrySetBodiesEnabled(const TArray<FBox3DAsyncBodyHandle>& Bodies, bool bEnabled);
+	/** Apply one total linear impulse distributed among dynamic bodies by mass. */
+	bool TryApplyGroupImpulse(const TArray<FBox3DAsyncBodyHandle>& Bodies, FVector Impulse);
+
+	/** Fields persist until removed or world teardown. Accepted operations are applied in queue order. */
+	bool TryCreateField(const FBox3DAsyncFieldDesc& Desc, FBox3DAsyncFieldHandle& OutField);
+	bool TryUpdateField(FBox3DAsyncFieldHandle Field, const FBox3DAsyncFieldDesc& Desc);
+	bool TryRemoveField(FBox3DAsyncFieldHandle Field);
+
+	/** Creation is asynchronous; poll GetJointStatus. Both body handles must belong to this world. */
+	bool TryCreateJoint(const FBox3DAsyncJointDesc& Desc, FBox3DAsyncJointHandle& OutJoint);
+	EBox3DAsyncJointStatus GetJointStatus(FBox3DAsyncJointHandle Joint) const;
+	bool TryGetLatestJointState(FBox3DAsyncJointHandle Joint, FBox3DAsyncJointState& OutState) const;
+	/** Queued controls apply at a fixed-step boundary and may be queued while creation is pending. */
+	bool TrySubmitJointCommand(FBox3DAsyncJointHandle Joint, const FBox3DAsyncJointCommand& Command);
+	/** Update tunable properties; joint type, bodies and local frames remain fixed.
+	 * Native spherical cone updates are limited to 90 degrees, even though creation allows wider cones. */
+	bool TryUpdateJoint(FBox3DAsyncJointHandle Joint, const FBox3DAsyncJointDesc& Settings);
+	/** Removes an active, pending or failed joint; retry if the command queue is full. */
+	bool TryRemoveJoint(FBox3DAsyncJointHandle Joint);
+	/** Single raw stream. Gap is sticky after overflow; poll joint status to resynchronize. */
+	void DrainJointBreakEvents(TArray<FBox3DAsyncJointBreakEvent>& OutEvents, bool& bOutGap);
 
 	/** Register a polling owner for bounded, independently routed line queries. */
 	bool TryRegisterQueryConsumer(FBox3DAsyncQueryConsumer& OutConsumer);
@@ -450,6 +516,10 @@ public:
 
 	/** Sample interpolated dynamic poses at monotonic time minus two fixed steps. */
 	void SamplePoses(TArray<FBox3DAsyncPose>& OutPoses, double* OutSampleTimeSeconds = nullptr) const;
+	/** Copy the newest completed worker publication without rendering interpolation. */
+	bool TryGetLatestPoseFrame(FBox3DAsyncPoseFrame& OutFrame) const;
+	/** Latest completed state, not a synchronous native read. Returns false for unavailable or removed bodies. */
+	bool TryGetLatestBodyState(FBox3DAsyncBodyHandle Body, FBox3DAsyncBodyState& OutState) const;
 	uint64 GetCompletedStepCount() const;
 	FBox3DAsyncDiagnostics GetDiagnostics() const;
 
@@ -462,7 +532,12 @@ private:
 	void PumpEventSubscriptions();
 	void CloseEventSubscriptions();
 	bool TryCreateAuthoredMeshCollision(UStaticMesh* Mesh, const FTransform& Transform, const FVector& Scale,
-		const FVector& InitialVelocity, bool bDynamic, FBox3DAsyncBodyId& OutBodyId);
+		const FVector& InitialVelocity, bool bDynamic, const FBox3DAsyncShapeOptions* Options,
+		FBox3DAsyncBodyId& OutBodyId);
 	struct FImpl;
-	TUniquePtr<FImpl> Impl;
+	struct FImplDeleter
+	{
+		void operator()(FImpl* Pointer) const;
+	};
+	TUniquePtr<FImpl, FImplDeleter> Impl;
 };

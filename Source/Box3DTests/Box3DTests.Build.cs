@@ -14,10 +14,13 @@ public class Box3DTests : ModuleRules
 			"Engine",
 			"Box3DCore",
 			"Box3DAsync",
+			"Box3DReplication",
+			"NetCore",
 			"Box3DRuntime",
 			"PhysicsCore",
 			"ProceduralMeshComponent",
 		});
+		SetupIrisSupport(Target);
 		PrivateIncludePaths.Add(Path.Combine(ModuleDirectory, "../Box3DRuntime/Private"));
 		PrivateIncludePaths.Add(Path.Combine(ModuleDirectory, "../Box3DAsync/Private"));
 	}
