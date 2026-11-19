@@ -1,6 +1,6 @@
 <div align="center">
   <h1>Box3D Unreal</h1>
-  <!-- Replace the placeholder below with <img src="docs/images/header.png" alt="Box3D shapes falling onto a platform in Unreal Engine"> when the banner is ready. -->
+  <img width="1280" height="640" alt="Header" src="https://github.com/user-attachments/assets/bac9af5c-135b-4a3a-b137-1a0e7a0881a8" />
   <p><em>Header image coming soon</em></p>
   <p>Simulate rigid bodies, joints, and breakable objects in Unreal Engine with Erin Catto’s Box3D physics engine.</p>
   <p>
