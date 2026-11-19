@@ -92,6 +92,65 @@ Open your `.uproject` file with Unreal Engine 5.7. If Unreal prompts you to rebu
 | Unreal can't build the modules. | Check that your project opens with UE 5.7 and that the Visual Studio C++ workload, MSVC, and Windows SDK are installed. Close Unreal, right-click the `.uproject`, choose **Generate Visual Studio project files**, and build the **Development Editor** target for **Win64** in Visual Studio. |
 | The console doesn't recognize `box3d.SmokeActors`. | Check that **Box3D Unreal** is enabled, restart the editor, and retry from the in-game console after clicking **Play**. |
 
+## Feature checklist
+
+Checked items indicate that an implementation exists; they do not imply complete
+feature parity between backends or production validation for every use case.
+
+### Synchronous physics
+
+- [x] Static and dynamic rigid bodies
+- [x] Kinematic bodies
+- [x] Collision shapes and mesh collision
+- [x] Forces, impulses, and velocity controls
+- [x] Collision queries and events
+- [x] Joints and constraints
+- [x] Ragdolls
+- [x] Cloth
+- [x] Ropes
+- [x] Grabbing and conveyors
+- [x] Destruction, fracture, and deformation
+- [x] Snapshots, recording, and rollback support
+
+### Asynchronous physics
+
+- [x] Worker-backed static, dynamic, and kinematic bodies
+- [x] Actorless body creation and removal
+- [x] Collision shapes and authored mesh collision
+- [x] Forces, impulses, velocity controls, and kinematic targets
+- [x] Completed pose frames and body-state readback
+- [x] Async raycasts, shape casts, overlaps, and collision events
+- [x] Joints, joint state, and break events
+- [x] Ragdoll bodies and joints with skeletal presentation
+- [x] Persistent acceleration fields and wind
+- [x] Blueprint APIs for body controls, queries, fields, and joints
+- [ ] Cloth simulation
+- [ ] Rope and conveyor features
+- [ ] Async destruction and fracture
+
+### Iris replication
+
+The Iris module presents **server-authoritative async dynamic bodies**. Clients
+receive body state and display local presentation actors; they do not simulate
+the shared authority bodies.
+
+- [x] Shared dynamic body pose replication
+- [x] Actorless body presentation on remote clients
+- [x] Actorless body presentation on listen hosts
+- [x] Placed shared presentation actors
+- [x] Dedicated-server operation without local actorless visuals
+- [x] Client pose interpolation
+- [x] Per-connection relevance and configurable distance-based update rates
+- [x] Body removal and presentation cleanup
+- [ ] Shared kinematic body presentation
+- [ ] Ragdoll group replication
+- [ ] Automatic replication of gameplay events, collision events, or joint breaks
+- [ ] Built-in client-to-server gameplay commands for spawning or pushing bodies
+
+The Iris path requires an Iris-enabled net driver and currently suspends
+replication after an authority world-origin shift. See the
+[replication guide](Source/Box3DReplication/README.md) for setup and limitations.
+
 ## License and credits
 
 - Box3D Unreal is available under the [MIT license](LICENSE).
