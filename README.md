@@ -1,7 +1,6 @@
 <div align="center">
   <h1>Box3D Unreal</h1>
   <img width="1280" height="640" alt="Header" src="https://github.com/user-attachments/assets/bac9af5c-135b-4a3a-b137-1a0e7a0881a8" />
-  <p><em>Header image coming soon</em></p>
   <p>Simulate rigid bodies, joints, and breakable objects in Unreal Engine with Erin Catto’s Box3D physics engine.</p>
   <p>
     <a href="#quick-start"><img src="https://img.shields.io/badge/Unreal_Engine-5.7-20252B?logo=unrealengine" alt="Unreal Engine 5.7"></a>
